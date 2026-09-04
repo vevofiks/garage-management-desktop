@@ -32,7 +32,8 @@
     "afterPack": "./scripts/after-pack.js",
     "asar": true,
     "asarUnpack": [
-      "**/*.node"
+      "**/*.node",
+      "**/node_modules/better-sqlite3/**/*"
     ],
     "files": [
       "electron/**/*",
