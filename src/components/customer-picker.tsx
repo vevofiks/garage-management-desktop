@@ -1,0 +1,107 @@
+"use client";
+
+import { useState, useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { apiClient } from "@/lib/api-client";
+import { queryKeys } from "@/lib/query-keys";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+
+type CustomerOption = {
+  id: number;
+  name: string;
+  phone: string | null;
+  vehicle_numbers: string | null;
+};
+
+export type SelectedCustomer = { id: number; name: string };
+
+export function CustomerPicker({
+  selected,
+  onSelect,
+}: {
+  selected: SelectedCustomer | null;
+  onSelect: (customer: SelectedCustomer | null) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [showAll, setShowAll] = useState(false);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => setDebounced(search), 250);
+    return () => clearTimeout(timeout);
+  }, [search]);
+
+  const { data: page, isLoading } = useQuery<{ data: CustomerOption[] }>({
+    queryKey: queryKeys.customers.list(debounced),
+    queryFn: () =>
+      apiClient.get<{ data: CustomerOption[] }>(
+        `/api/customers?page_size=50${debounced ? `&q=${encodeURIComponent(debounced)}` : ""}`
+      ),
+    enabled: !selected,
+  });
+  const customers = page?.data;
+
+  const displayedCustomers = debounced || showAll ? customers : customers?.slice(0, 5);
+  const hasMore = !debounced && !showAll && customers && customers.length > 5;
+
+  if (selected) {
+    return (
+      <div className="flex items-center justify-between rounded-md border px-3 py-2">
+        <span className="text-sm font-medium">{selected.name}</span>
+        <Button type="button" variant="ghost" size="sm" onClick={() => onSelect(null)}>
+          Change
+        </Button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <Input
+        placeholder="Search customer by name, phone, vehicle number, or model…"
+        value={search}
+        onChange={(e) => {
+          setSearch(e.target.value);
+          setShowAll(false);
+        }}
+      />
+      <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-1">
+        {isLoading && <Skeleton className="h-8 w-full" />}
+        {!isLoading && customers?.length === 0 && (
+          <p className="px-2 py-1.5 text-sm text-muted-foreground">
+            {debounced ? "No customers found." : "No customers yet — add one first."}
+          </p>
+        )}
+        {!isLoading &&
+          displayedCustomers?.map((customer) => (
+            <Button
+              key={customer.id}
+              type="button"
+              variant="ghost"
+              className="h-auto w-full flex-col items-start justify-start gap-0 px-2 py-1.5 text-left"
+              onClick={() => onSelect({ id: customer.id, name: customer.name })}
+            >
+              <span className="w-full font-medium">{customer.name}</span>
+              <span className="w-full text-xs font-normal text-muted-foreground">
+                {[customer.phone, customer.vehicle_numbers].filter(Boolean).join(" · ") ||
+                  "No contact info"}
+              </span>
+            </Button>
+          ))}
+        {hasMore && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="w-full justify-start text-xs text-muted-foreground"
+            onClick={() => setShowAll(true)}
+          >
+            See all... or search from top search bar
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
