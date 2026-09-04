@@ -20,6 +20,11 @@
     "appId": "com.babuawamir.garage",
     "productName": "babuawamirautogarage",
     "copyright": "Copyright © 2026 Vevofiks Solutions",
+    "publish": {
+      "provider": "github",
+      "owner": "vevofiks",
+      "repo": "garage-management-desktop"
+    },
     "npmRebuild": false,
     "directories": {
       "output": "dist"
