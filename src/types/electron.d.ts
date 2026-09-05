@@ -1,5 +1,5 @@
 export interface ElectronAPI {
-  printInvoice?: () => Promise<void> | void;
+  printInvoice?: (options?: any) => Promise<{ success: boolean; error?: string | null }>;
   getAppVersion?: () => Promise<string>;
   checkForUpdates?: () => Promise<{
     status: "error" | "dev-mode" | "latest" | "update-available";

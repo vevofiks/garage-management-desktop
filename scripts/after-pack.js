@@ -35,5 +35,28 @@ exports.default = async function (context) {
     fs.cpSync(rootBetterSqlite, targetBetterSqlite, copyOptions);
   }
 
+  const pgPackages = [
+    'pg',
+    'pg-pool',
+    'pg-protocol',
+    'pg-types',
+    'pgpass',
+    'pg-cloudflare',
+    'pg-connection-string',
+    'pg-int8',
+    'postgres-array',
+    'postgres-bytea',
+    'postgres-date',
+    'postgres-interval',
+  ];
+  for (const pkg of pgPackages) {
+    const src = path.join(projectDir, 'node_modules', pkg);
+    const dest = path.join(targetNodeModules, pkg);
+    if (fs.existsSync(src)) {
+      console.log(`[afterPack] Ensuring ${pkg} in resources/standalone/node_modules/${pkg}...`);
+      fs.cpSync(src, dest, copyOptions);
+    }
+  }
+
   console.log('[afterPack] afterPack hook completed successfully.');
 };

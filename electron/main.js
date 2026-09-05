@@ -318,9 +318,24 @@ async function createWindow() {
 }
 
 // Renderer calls window.electronAPI.printInvoice() (exposed via preload.js)
-ipcMain.handle('print-invoice', (event) => {
+ipcMain.handle('print-invoice', async (event, customOptions = {}) => {
   const win = BrowserWindow.fromWebContents(event.sender);
-  win?.webContents.print({ silent: false, printBackground: true, pageSize: 'A4' });
+  if (!win) return { success: false, error: 'No active window found' };
+
+  return new Promise((resolve) => {
+    win.webContents.print(
+      {
+        silent: false,
+        printBackground: true,
+        usePrinterDefaultPageSize: true,
+        ...customOptions,
+      },
+      (success, failureReason) => {
+        log(`[PRINT] Completed: success=${success}, failureReason=${failureReason || 'none'}`);
+        resolve({ success, error: failureReason || null });
+      }
+    );
+  });
 });
 
 // Auto-updater setup and IPC Handlers

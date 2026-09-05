@@ -62,6 +62,29 @@ if (fs.existsSync(srcBetterSqlite)) {
   fs.cpSync(srcBetterSqlite, destBetterSqlite, copyOptions);
 }
 
+console.log('Ensuring pg and dependencies in standalone node_modules...');
+const pgPackages = [
+  'pg',
+  'pg-pool',
+  'pg-protocol',
+  'pg-types',
+  'pgpass',
+  'pg-cloudflare',
+  'pg-connection-string',
+  'pg-int8',
+  'postgres-array',
+  'postgres-bytea',
+  'postgres-date',
+  'postgres-interval',
+];
+for (const pkg of pgPackages) {
+  const src = path.join(projectRoot, 'node_modules', pkg);
+  const dest = path.join(standaloneDir, 'node_modules', pkg);
+  if (fs.existsSync(src)) {
+    fs.cpSync(src, dest, copyOptions);
+  }
+}
+
 // Fallback: If Next placed server.js in a subfolder, also ensure the root has server.js
 if (!fs.existsSync(path.join(standaloneDir, 'server.js'))) {
   const entries = fs.readdirSync(standaloneDir, { withFileTypes: true });

@@ -67,11 +67,20 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
     onError: (error: ApiError) => toast.error(error.message || "Failed to delete invoice"),
   });
 
-  const handlePrint = () => {
+  const handlePrint = async () => {
     // Electron: real native print dialog via preload's contextBridge.
     // Plain browser tab (npm run dev:next only): window.print() fallback.
     if (typeof window !== "undefined" && window.electronAPI?.printInvoice) {
-      window.electronAPI.printInvoice();
+      try {
+        const res = await window.electronAPI.printInvoice();
+        if (res && !res.success && res.error) {
+          if (res.error !== "Print job canceled") {
+            toast.error(`Printing failed: ${res.error}`);
+          }
+        }
+      } catch (err: any) {
+        toast.error(`Print error: ${err.message || "Unknown error"}`);
+      }
     } else {
       window.print();
     }
