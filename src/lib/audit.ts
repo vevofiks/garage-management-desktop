@@ -9,14 +9,16 @@
 
 import db from './db';
 
-const insertAuditLog = db.prepare(
-  'INSERT INTO audit_logs (user_id, username, action, description) VALUES (?, ?, ?, ?)'
-);
-
 export function logAudit(
   user: { id: number; username: string },
   action: string,
   description: string
 ) {
-  insertAuditLog.run(user.id, user.username, action, description);
+  try {
+    db.prepare(
+      'INSERT INTO audit_logs (user_id, username, action, description) VALUES (?, ?, ?, ?)'
+    ).run(user.id, user.username, action, description);
+  } catch (err) {
+    console.error('Failed to write audit log:', err);
+  }
 }

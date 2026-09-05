@@ -17,7 +17,11 @@ if (fs.existsSync(nextDir)) {
 }
 
 console.log('Building Next.js app...');
-execSync('npm run build', { stdio: 'inherit', cwd: projectRoot });
+execSync('npm run build', {
+  stdio: 'inherit',
+  cwd: projectRoot,
+  env: { ...process.env, NEXT_PHASE: 'phase-production-build' },
+});
 
 const standaloneDir = path.join(projectRoot, '.next/standalone');
 console.log('Copying static assets to standalone folder...');

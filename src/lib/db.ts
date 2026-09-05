@@ -66,6 +66,13 @@ class NodeSqliteAdapter implements SqliteDb {
 
   constructor(dbPath: string, sqliteModule: any) {
     this.syncDb = new sqliteModule.DatabaseSync(dbPath);
+    try {
+      this.syncDb.exec('PRAGMA busy_timeout = 30000;');
+      if (dbPath !== ':memory:') {
+        this.syncDb.exec('PRAGMA journal_mode = WAL;');
+        this.syncDb.exec('PRAGMA synchronous = NORMAL;');
+      }
+    } catch (_) {}
   }
 
   exec(sql: string): void {
@@ -450,6 +457,17 @@ function bootstrapDatabase(db: SqliteDb) {
 
 function getRawDb(): SqliteDb {
   if (!rawDb) {
+    const isBuildPhase =
+      process.env.NEXT_PHASE === 'phase-production-build' ||
+      process.env.npm_lifecycle_event === 'build' ||
+      (typeof process.argv !== 'undefined' && process.argv.some((a) => a.includes('next') && a.includes('build')));
+
+    if (isBuildPhase) {
+      rawDb = createSqliteDatabase(':memory:');
+      bootstrapDatabase(rawDb);
+      return rawDb;
+    }
+
     const dir = getDataDir();
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const customPath = process.env.DATABASE_PATH || (process.env.DATABASE_URL && !process.env.DATABASE_URL.startsWith('postgres') ? process.env.DATABASE_URL : undefined);
