@@ -282,15 +282,17 @@ async function createWindow() {
     log(`Standalone NODE_PATH: ${process.env.NODE_PATH || '(unset)'}`);
 
     try {
-      // Verify native SQLite binding before loading the server (common Windows failure).
+      // Verify SQLite driver availability in Electron environment
       try {
-        require(path.join(standaloneModules, 'better-sqlite3'));
-        log('better-sqlite3 native module loaded successfully');
-      } catch (sqliteErr) {
-        log(
-          'WARNING: better-sqlite3 failed to load — login/API database calls will return 500:',
-          sqliteErr && sqliteErr.stack ? sqliteErr.stack : sqliteErr
-        );
+        require('node:sqlite');
+        log('Built-in node:sqlite driver verified in Electron environment');
+      } catch (_) {
+        try {
+          require(path.join(standaloneModules, 'better-sqlite3'));
+          log('better-sqlite3 native module loaded successfully');
+        } catch (sqliteErr) {
+          log('WARNING: SQLite driver failed to load:', sqliteErr);
+        }
       }
 
       require(serverScript);

@@ -9,10 +9,127 @@
  * Never import this in client components; better-sqlite3 is Node.js-only.
  */
 
-import Database from 'better-sqlite3';
+// Dual-driver SQLite support: prefers built-in node:sqlite (zero C++ compilation, immune to Electron ABI mismatch)
+// with seamless fallback to better-sqlite3.
 import path from 'path';
 import fs from 'fs';
 import { hashPassword } from './auth';
+
+export interface SqliteStatement {
+  all(...params: any[]): any[];
+  get(...params: any[]): any;
+  run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
+}
+
+export interface SqliteDb {
+  exec(sql: string): void;
+  pragma(pragmaSql: string): any;
+  prepare(sql: string): SqliteStatement;
+  transaction<T extends (...args: any[]) => any>(fn: T): T;
+  backup(backupPath: string): Promise<void>;
+  close?(): void;
+}
+
+class NodeSqliteAdapter implements SqliteDb {
+  private syncDb: any;
+
+  constructor(dbPath: string) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite');
+    this.syncDb = new DatabaseSync(dbPath);
+  }
+
+  exec(sql: string): void {
+    this.syncDb.exec(sql);
+  }
+
+  pragma(pragmaSql: string): any {
+    try {
+      this.syncDb.exec(`PRAGMA ${pragmaSql};`);
+    } catch (_) {
+      try {
+        return this.syncDb.prepare(`PRAGMA ${pragmaSql}`).all();
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  prepare(sql: string): SqliteStatement {
+    const stmt = this.syncDb.prepare(sql);
+    return {
+      all: (...args: any[]) => {
+        if (args.length === 1 && Array.isArray(args[0])) {
+          return stmt.all(...args[0]);
+        }
+        return stmt.all(...args);
+      },
+      get: (...args: any[]) => {
+        if (args.length === 1 && Array.isArray(args[0])) {
+          return stmt.get(...args[0]);
+        }
+        return stmt.get(...args);
+      },
+      run: (...args: any[]) => {
+        if (args.length === 1 && Array.isArray(args[0])) {
+          return stmt.run(...args[0]);
+        }
+        return stmt.run(...args);
+      },
+    };
+  }
+
+  transaction<T extends (...args: any[]) => any>(fn: T): T {
+    const syncDb = this.syncDb;
+    return function (this: any, ...args: any[]) {
+      syncDb.exec('BEGIN IMMEDIATE');
+      try {
+        const result = fn.apply(this, args);
+        syncDb.exec('COMMIT');
+        return result;
+      } catch (err) {
+        try {
+          syncDb.exec('ROLLBACK');
+        } catch (_) {}
+        throw err;
+      }
+    } as unknown as T;
+  }
+
+  async backup(backupPath: string): Promise<void> {
+    const escaped = backupPath.replace(/'/g, "''");
+    this.syncDb.exec(`VACUUM INTO '${escaped}'`);
+  }
+
+  close(): void {
+    this.syncDb.close();
+  }
+}
+
+function createSqliteDatabase(dbPath: string): SqliteDb {
+  // 1. Try built-in node:sqlite (native to Node 22+ and Electron 41+, immune to ABI mismatches)
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { DatabaseSync } = require('node:sqlite');
+    if (typeof DatabaseSync === 'function') {
+      console.log('[DB] Using built-in node:sqlite driver');
+      return new NodeSqliteAdapter(dbPath);
+    }
+  } catch (e: any) {
+    console.warn('[DB] Built-in node:sqlite not available, trying better-sqlite3:', e?.message);
+  }
+
+  // 2. Fallback to better-sqlite3
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const BetterSqlite = require('better-sqlite3');
+    console.log('[DB] Using better-sqlite3 driver');
+    return new BetterSqlite(dbPath);
+  } catch (err: any) {
+    console.error('[DB] Failed to initialize SQLite database with any driver:', err);
+    throw err;
+  }
+}
 
 // Resolve the `data/` directory relative to user data directory or project root in dev.
 export function getDataDir(): string {
@@ -26,10 +143,10 @@ export function getDataDir(): string {
 
 export const dataDir = getDataDir();
 
-let rawDb: InstanceType<typeof Database> | null = null;
+let rawDb: SqliteDb | null = null;
 let bootstrapped = false;
 
-function bootstrapDatabase(db: InstanceType<typeof Database>) {
+function bootstrapDatabase(db: SqliteDb) {
   if (bootstrapped) return;
   bootstrapped = true;
 
@@ -303,20 +420,20 @@ function bootstrapDatabase(db: InstanceType<typeof Database>) {
   }
 }
 
-function getRawDb(): InstanceType<typeof Database> {
+function getRawDb(): SqliteDb {
   if (!rawDb) {
     const dir = getDataDir();
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     const customPath = process.env.DATABASE_PATH || (process.env.DATABASE_URL && !process.env.DATABASE_URL.startsWith('postgres') ? process.env.DATABASE_URL : undefined);
     const dbPath = customPath || path.join(dir, 'garage.db');
     console.log('[DB] Initializing SQLite database at:', dbPath);
-    rawDb = new Database(dbPath);
+    rawDb = createSqliteDatabase(dbPath);
     bootstrapDatabase(rawDb);
   }
   return rawDb;
 }
 
-const db = new Proxy({} as InstanceType<typeof Database>, {
+const db = new Proxy({} as SqliteDb, {
   get(_target, prop, receiver) {
     const instance = getRawDb();
     const val = Reflect.get(instance, prop, receiver);
