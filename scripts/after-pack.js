@@ -35,5 +35,22 @@ exports.default = async function (context) {
     fs.cpSync(rootBetterSqlite, targetBetterSqlite, copyOptions);
   }
 
+  // If compiler tools exist (e.g. GitHub Actions runner), rebuild better-sqlite3 for Electron ABI
+  try {
+    const electronPkgPath = path.join(projectDir, 'node_modules/electron/package.json');
+    if (fs.existsSync(electronPkgPath) && fs.existsSync(standaloneDir)) {
+      const electronVersion = require(electronPkgPath).version;
+      const { execSync } = require('child_process');
+      console.log(`[afterPack] Attempting native compilation of better-sqlite3 for Electron ${electronVersion}...`);
+      execSync(
+        `npx @electron/rebuild --version ${electronVersion} -f -w better-sqlite3 -m "${standaloneDir}"`,
+        { stdio: 'inherit', cwd: standaloneDir }
+      );
+      console.log('[afterPack] Successfully rebuilt native module for Electron!');
+    }
+  } catch (_) {
+    console.warn('[afterPack] Native rebuild skipped (compiler not available); app will use built-in node:sqlite driver.');
+  }
+
   console.log('[afterPack] afterPack hook completed successfully.');
 };
