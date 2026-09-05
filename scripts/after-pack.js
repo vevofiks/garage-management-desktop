@@ -1,24 +1,7 @@
-const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
 const copyOptions = { recursive: true, dereference: true };
-
-function readElectronVersion(projectDir) {
-  const electronPkgPath = path.join(projectDir, 'node_modules/electron/package.json');
-  if (!fs.existsSync(electronPkgPath)) {
-    throw new Error('Electron package.json not found during afterPack.');
-  }
-  return require(electronPkgPath).version;
-}
-
-function rebuildNativeModulesForElectron(moduleDir, electronVersion) {
-  console.log(`[afterPack] Rebuilding native modules for Electron ${electronVersion}...`);
-  execSync(
-    `npx @electron/rebuild --version ${electronVersion} -f -w better-sqlite3 -m "${moduleDir}"`,
-    { stdio: 'inherit', cwd: moduleDir }
-  );
-}
 
 exports.default = async function (context) {
   console.log('[afterPack] Checking standalone node_modules in packaged app...');
@@ -45,8 +28,12 @@ exports.default = async function (context) {
     fs.cpSync(rootNext, targetNext, copyOptions);
   }
 
-  if (fs.existsSync(standaloneDir)) {
-    const electronVersion = readElectronVersion(projectDir);
-    rebuildNativeModulesForElectron(standaloneDir, electronVersion);
+  const rootBetterSqlite = path.join(projectDir, 'node_modules/better-sqlite3');
+  const targetBetterSqlite = path.join(targetNodeModules, 'better-sqlite3');
+  if (fs.existsSync(rootBetterSqlite)) {
+    console.log('[afterPack] Ensuring prebuilt better-sqlite3 in resources/standalone/node_modules/better-sqlite3...');
+    fs.cpSync(rootBetterSqlite, targetBetterSqlite, copyOptions);
   }
+
+  console.log('[afterPack] afterPack hook completed successfully.');
 };
