@@ -26,6 +26,7 @@
       "repo": "garage-management-desktop"
     },
     "npmRebuild": false,
+    "nodeGypRebuild": false,
     "directories": {
       "output": "dist"
     },
