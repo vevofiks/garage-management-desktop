@@ -10,7 +10,7 @@
     "dev:electron": "wait-on http://localhost:3000 && electron .",
     "dev": "concurrently -k \"npm run dev:next\" \"npm run dev:electron\"",
     "build": "next build",
-    "build:electron": "node scripts/build-exe.js && electron-builder --win",
+    "build:electron": "node scripts/build-exe.js && electron-builder --win --publish never",
     "build:linux": "node scripts/build-exe.js && electron-builder --linux",
     "start": "next start",
     "reset-password": "node scripts/reset-admin-password.js",
