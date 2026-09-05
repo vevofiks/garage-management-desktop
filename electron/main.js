@@ -267,8 +267,32 @@ async function createWindow() {
       return;
     }
 
+    const serverDir = path.dirname(serverScript);
+    const standaloneModules = path.join(serverDir, 'node_modules');
+
+    // Standalone Next.js must run with its own cwd and module resolution paths.
+    process.chdir(serverDir);
+    if (fs.existsSync(standaloneModules)) {
+      process.env.NODE_PATH = standaloneModules;
+      require('module').Module._initPaths();
+    }
+
     log(`Starting standalone server from: ${serverScript}`);
+    log(`Standalone cwd: ${serverDir}`);
+    log(`Standalone NODE_PATH: ${process.env.NODE_PATH || '(unset)'}`);
+
     try {
+      // Verify native SQLite binding before loading the server (common Windows failure).
+      try {
+        require(path.join(standaloneModules, 'better-sqlite3'));
+        log('better-sqlite3 native module loaded successfully');
+      } catch (sqliteErr) {
+        log(
+          'WARNING: better-sqlite3 failed to load — login/API database calls will return 500:',
+          sqliteErr && sqliteErr.stack ? sqliteErr.stack : sqliteErr
+        );
+      }
+
       require(serverScript);
       log('Standalone server module required successfully');
     } catch (err) {
