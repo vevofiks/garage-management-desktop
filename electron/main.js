@@ -4,6 +4,13 @@ const http = require('http');
 const fs = require('fs');
 const net = require('net');
 
+// Office PCs frequently run old/integrated GPU drivers that crash or hang Chromium's GPU
+// process silently. Chromium's print pipeline rasterizes pages through that same GPU
+// compositor, so a flaky GPU driver on a client machine can leave a print job stuck at
+// "Spooling" forever even though the exact same code prints fine on a dev machine with a
+// healthier GPU. Must be called before app is ready.
+app.disableHardwareAcceleration();
+
 let mainWindow = null;
 let logFilePath = null;
 
@@ -322,19 +329,59 @@ ipcMain.handle('print-invoice', async (event, customOptions = {}) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) return { success: false, error: 'No active window found' };
 
-  return new Promise((resolve) => {
-    win.webContents.print(
-      {
-        silent: false,
-        printBackground: true,
-        usePrinterDefaultPageSize: true,
-        ...customOptions,
-      },
-      (success, failureReason) => {
-        log(`[PRINT] Completed: success=${success}, failureReason=${failureReason || 'none'}`);
-        resolve({ success, error: failureReason || null });
-      }
+  let printers = [];
+  try {
+    printers = await win.webContents.getPrintersAsync();
+    log(
+      '[PRINT] Available printers:',
+      printers.length
+        ? printers.map((p) => `${p.name}${p.isDefault ? ' (default)' : ''}${p.status !== undefined ? ` [status=${p.status}]` : ''}`).join(', ')
+        : '(none found)'
     );
+  } catch (err) {
+    log('[PRINT] Failed to enumerate printers:', err && err.message);
+  }
+
+  // GUSTEC GT1122n is a monochrome direct-thermal A4 printer — forcing grayscale keeps the
+  // rasterized job small. A full-color job (the invoice has red banners) has been observed
+  // getting stuck at "Spooling" forever in the Windows print queue on this printer's driver.
+  const matchedPrinter = printers.find((p) => /gustec|gt1122/i.test(p.name));
+
+  const printOptions = {
+    silent: false,
+    printBackground: true,
+    color: false,
+    pageSize: 'A4',
+    margins: { marginType: 'none' },
+    ...(matchedPrinter ? { deviceName: matchedPrinter.name } : {}),
+    ...customOptions,
+  };
+
+  log('[PRINT] Starting print job with options:', JSON.stringify(printOptions));
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const timeoutMs = 60000;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      log(
+        `[PRINT] No callback from webContents.print() after ${timeoutMs}ms — job may be stuck spooling. ` +
+          'Check the Windows print queue and the printer\'s Advanced properties ("Print directly to the printer" instead of spooling).'
+      );
+      resolve({
+        success: false,
+        error: 'Print job timed out. Check the printer connection and the Windows print queue.',
+      });
+    }, timeoutMs);
+
+    win.webContents.print(printOptions, (success, failureReason) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      log(`[PRINT] Completed: success=${success}, failureReason=${failureReason || 'none'}`);
+      resolve({ success, error: failureReason || null });
+    });
   });
 });
 

@@ -33,11 +33,16 @@ jobs:
       - name: Install Dependencies
         run: npm ci
 
+      - name: Read app version
+        id: pkg
+        shell: bash
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
       - name: Build Next.js & Electron Package
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CLOUD_DATABASE_URL: ${{ secrets.CLOUD_DATABASE_URL || 'postgresql://neondb_owner:npg_2WfIXydQTn1z@ep-purple-frost-aynhchr1-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require' }}
+          CLOUD_DATABASE_URL: ${{ secrets.CLOUD_DATABASE_URL }}
         run: npm run build:electron
 
       - name: Upload Installer Artifact
@@ -53,8 +58,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v0.1.0
-          name: Babu Awamir Auto Garage v0.1.0
+          tag_name: v${{ steps.pkg.outputs.version }}
+          name: Babu Awamir Auto Garage v${{ steps.pkg.outputs.version }}
           draft: false
           prerelease: false
           generate_release_notes: true
