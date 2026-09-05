@@ -64,6 +64,7 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "artifactName": "babuawamirautogarage.${ext}"
     }

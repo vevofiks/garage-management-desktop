@@ -30,13 +30,42 @@ export interface SqliteDb {
   close?(): void;
 }
 
+function getSqliteModule(): any {
+  // 1. Check global.__node_sqlite (passed directly from Electron main process)
+  if (typeof (global as any).__node_sqlite !== 'undefined') {
+    return (global as any).__node_sqlite;
+  }
+  // 2. Try process.getBuiltinModule('node:sqlite') (bypasses Next.js require-hook)
+  if (typeof (process as any).getBuiltinModule === 'function') {
+    try {
+      const mod = (process as any).getBuiltinModule('node:sqlite');
+      if (mod && typeof mod.DatabaseSync === 'function') return mod;
+    } catch (_) {}
+  }
+  // 3. Try standard node:sqlite via escape hatch
+  try {
+    const builtinRequire = typeof (global as any).__non_webpack_require__ !== 'undefined'
+      ? (global as any).__non_webpack_require__
+      // eslint-disable-next-line no-eval
+      : eval('require');
+    const mod = builtinRequire('node:sqlite');
+    if (mod && typeof mod.DatabaseSync === 'function') return mod;
+  } catch (_) {}
+  // 4. Try direct require
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const mod = require('node:sqlite');
+    if (mod && typeof mod.DatabaseSync === 'function') return mod;
+  } catch (_) {}
+
+  return null;
+}
+
 class NodeSqliteAdapter implements SqliteDb {
   private syncDb: any;
 
-  constructor(dbPath: string) {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { DatabaseSync } = require('node:sqlite');
-    this.syncDb = new DatabaseSync(dbPath);
+  constructor(dbPath: string, sqliteModule: any) {
+    this.syncDb = new sqliteModule.DatabaseSync(dbPath);
   }
 
   exec(sql: string): void {
@@ -109,14 +138,13 @@ class NodeSqliteAdapter implements SqliteDb {
 function createSqliteDatabase(dbPath: string): SqliteDb {
   // 1. Try built-in node:sqlite (native to Node 22+ and Electron 41+, immune to ABI mismatches)
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { DatabaseSync } = require('node:sqlite');
-    if (typeof DatabaseSync === 'function') {
+    const sqliteMod = getSqliteModule();
+    if (sqliteMod && typeof sqliteMod.DatabaseSync === 'function') {
       console.log('[DB] Using built-in node:sqlite driver');
-      return new NodeSqliteAdapter(dbPath);
+      return new NodeSqliteAdapter(dbPath, sqliteMod);
     }
   } catch (e: any) {
-    console.warn('[DB] Built-in node:sqlite not available, trying better-sqlite3:', e?.message);
+    console.warn('[DB] Built-in node:sqlite initialization error, trying better-sqlite3:', e?.message);
   }
 
   // 2. Fallback to better-sqlite3

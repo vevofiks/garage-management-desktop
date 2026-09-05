@@ -46,3 +46,6 @@ next-env.d.ts
 
 # local SQLite database (generated at runtime, never commit)
 /data/
+
+# scratch test scripts
+/scratch/

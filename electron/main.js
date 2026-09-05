@@ -256,6 +256,13 @@ async function createWindow() {
     process.env.PORT = String(port);
     log(`Selected port: ${port}`);
 
+    // Ensure Next.js cache directory is inside writable userData (prevents EPERM in Program Files)
+    const cacheDir = path.join(userDataPath, '.cache');
+    if (!fs.existsSync(cacheDir)) {
+      try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
+    }
+    process.env.NEXT_CACHE_DIR = cacheDir;
+
     const serverScript = findStandaloneServer();
     if (!serverScript) {
       log('CRITICAL: Standalone server.js could not be found!');
@@ -282,10 +289,11 @@ async function createWindow() {
     log(`Standalone NODE_PATH: ${process.env.NODE_PATH || '(unset)'}`);
 
     try {
-      // Verify SQLite driver availability in Electron environment
+      // Attach built-in SQLite driver to global so Next.js API routes have guaranteed direct access
       try {
-        require('node:sqlite');
-        log('Built-in node:sqlite driver verified in Electron environment');
+        const sqlite = require('node:sqlite');
+        global.__node_sqlite = sqlite;
+        log('Built-in node:sqlite driver verified and attached to global.__node_sqlite');
       } catch (_) {
         try {
           require(path.join(standaloneModules, 'better-sqlite3'));
