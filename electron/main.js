@@ -325,27 +325,94 @@ async function createWindow() {
 }
 
 // Renderer calls window.electronAPI.printInvoice() (exposed via preload.js)
-ipcMain.handle('print-invoice', async (event, customOptions = {}) => {
+ipcMain.handle('log-to-app', (_event, payload = {}) => {
+  const { message, data, at } = payload;
+  log(`[PRINT][ui] ${at ? `[${at}] ` : ''}${message || '(no message)'}`, data ? JSON.stringify(data) : '');
+});
+
+ipcMain.handle('print-invoice', async (event, payload = {}) => {
+  const customOptions = payload.options || {};
+  const debugContext = payload.debugContext || {};
+  const startedAt = Date.now();
+
+  log('[PRINT] ========== Print job started ==========');
+  log('[PRINT] App packaged:', app.isPackaged);
+  log('[PRINT] Platform:', process.platform);
+  log('[PRINT] Electron:', process.versions.electron, '| Chrome:', process.versions.chrome);
+  if (Object.keys(debugContext).length > 0) {
+    log('[PRINT] Renderer context:', JSON.stringify(debugContext));
+  }
+
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return { success: false, error: 'No active window found' };
+  if (!win) {
+    log('[PRINT] ERROR: No BrowserWindow found for print request');
+    return { success: false, error: 'No active window found', elapsedMs: Date.now() - startedAt };
+  }
+
+  const pageUrl = win.webContents.getURL();
+  log('[PRINT] Window URL:', pageUrl);
+  log('[PRINT] Window title:', win.webContents.getTitle());
+  log('[PRINT] Page isLoading:', win.webContents.isLoading());
+  log('[PRINT] Page isLoadingMainFrame:', win.webContents.isLoadingMainFrame());
+
+  try {
+    const readiness = await win.webContents.executeJavaScript(`({
+      readyState: document.readyState,
+      title: document.title,
+      imageCount: document.images.length,
+      imagesLoaded: Array.from(document.images).filter(i => i.complete && i.naturalHeight > 0).length,
+      imagesFailed: Array.from(document.images).filter(i => i.complete && i.naturalHeight === 0).map(i => i.src),
+      bodyTextLength: document.body ? document.body.innerText.length : 0,
+    })`, true);
+    log('[PRINT] Main-process page snapshot:', JSON.stringify(readiness));
+    if (readiness.imagesFailed?.length) {
+      log('[PRINT] WARNING: Broken image(s) on page — print raster may fail or hang:', readiness.imagesFailed.join(', '));
+    }
+    if (readiness.bodyTextLength === 0) {
+      log('[PRINT] WARNING: Page body appears empty — invoice may not have rendered yet');
+    }
+  } catch (err) {
+    log('[PRINT] Could not read page snapshot:', err && err.message);
+  }
 
   let printers = [];
   try {
     printers = await win.webContents.getPrintersAsync();
-    log(
-      '[PRINT] Available printers:',
-      printers.length
-        ? printers.map((p) => `${p.name}${p.isDefault ? ' (default)' : ''}${p.status !== undefined ? ` [status=${p.status}]` : ''}`).join(', ')
-        : '(none found)'
-    );
+    if (printers.length === 0) {
+      log('[PRINT] WARNING: No printers detected by Electron');
+    } else {
+      for (const p of printers) {
+        log(
+          '[PRINT] Printer:',
+          JSON.stringify({
+            name: p.name,
+            isDefault: p.isDefault,
+            status: p.status,
+            description: p.description,
+            displayName: p.displayName,
+            options: p.options,
+          })
+        );
+      }
+    }
   } catch (err) {
-    log('[PRINT] Failed to enumerate printers:', err && err.message);
+    log('[PRINT] ERROR: Failed to enumerate printers:', err && err.stack ? err.stack : err);
   }
 
   // GUSTEC GT1122n is a monochrome direct-thermal A4 printer — forcing grayscale keeps the
   // rasterized job small. A full-color job (the invoice has red banners) has been observed
   // getting stuck at "Spooling" forever in the Windows print queue on this printer's driver.
   const matchedPrinter = printers.find((p) => /gustec|gt1122/i.test(p.name));
+  const defaultPrinter = printers.find((p) => p.isDefault);
+
+  if (matchedPrinter) {
+    log('[PRINT] Matched GUSTEC/GT1122 printer:', matchedPrinter.name);
+  } else {
+    log(
+      '[PRINT] No GUSTEC/GT1122 name match — using default printer',
+      defaultPrinter ? defaultPrinter.name : '(none — Windows will prompt)'
+    );
+  }
 
   const printOptions = {
     silent: false,
@@ -357,31 +424,62 @@ ipcMain.handle('print-invoice', async (event, customOptions = {}) => {
     ...customOptions,
   };
 
-  log('[PRINT] Starting print job with options:', JSON.stringify(printOptions));
+  log('[PRINT] Calling webContents.print() with options:', JSON.stringify(printOptions));
 
   return new Promise((resolve) => {
     let settled = false;
     const timeoutMs = 60000;
+    const printStartedAt = Date.now();
+
     const timeout = setTimeout(() => {
       if (settled) return;
       settled = true;
+      const elapsedMs = Date.now() - startedAt;
       log(
-        `[PRINT] No callback from webContents.print() after ${timeoutMs}ms — job may be stuck spooling. ` +
-          'Check the Windows print queue and the printer\'s Advanced properties ("Print directly to the printer" instead of spooling).'
+        `[PRINT] TIMEOUT after ${timeoutMs}ms — webContents.print() callback never fired. ` +
+          'Job may be stuck at "Spooling" in Windows. Try: Printer Properties → Advanced → ' +
+          '"Print directly to the printer", clear the print queue, or reinstall the driver.'
       );
       resolve({
         success: false,
         error: 'Print job timed out. Check the printer connection and the Windows print queue.',
+        elapsedMs,
+        printerUsed: printOptions.deviceName || defaultPrinter?.name || null,
       });
     }, timeoutMs);
 
-    win.webContents.print(printOptions, (success, failureReason) => {
+    try {
+      win.webContents.print(printOptions, (success, failureReason) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        const callbackMs = Date.now() - printStartedAt;
+        const elapsedMs = Date.now() - startedAt;
+        log(
+          `[PRINT] webContents.print() callback after ${callbackMs}ms — success=${success}, ` +
+            `failureReason=${failureReason || 'none'}, totalElapsed=${elapsedMs}ms`
+        );
+        log('[PRINT] ========== Print job finished ==========');
+        resolve({
+          success,
+          error: failureReason || null,
+          elapsedMs,
+          printerUsed: printOptions.deviceName || defaultPrinter?.name || null,
+        });
+      });
+      log('[PRINT] webContents.print() invoked — waiting for dialog and spooler…');
+    } catch (err) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      log(`[PRINT] Completed: success=${success}, failureReason=${failureReason || 'none'}`);
-      resolve({ success, error: failureReason || null });
-    });
+      log('[PRINT] ERROR: webContents.print() threw:', err && err.stack ? err.stack : err);
+      resolve({
+        success: false,
+        error: (err && err.message) || String(err),
+        elapsedMs: Date.now() - startedAt,
+        printerUsed: printOptions.deviceName || defaultPrinter?.name || null,
+      });
+    }
   });
 });
 

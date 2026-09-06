@@ -9,7 +9,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
-  printInvoice: (options) => ipcRenderer.invoke('print-invoice', options),
+  logToApp: (payload) => ipcRenderer.invoke('log-to-app', payload),
+  printInvoice: (payload) => ipcRenderer.invoke('print-invoice', payload),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   downloadUpdate: () => ipcRenderer.invoke('download-update'),

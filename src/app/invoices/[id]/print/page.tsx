@@ -1,7 +1,6 @@
 "use client";
 
-import { use } from "react";
-import Image from "next/image";
+import { use, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -11,6 +10,7 @@ import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { formatCurrency, formatDate } from "@/lib/format";
 import { PAYMENT_METHOD_LABELS, type PaymentMethod } from "@/lib/schemas/invoice";
+import { logToApp, waitForPrintAssets } from "@/lib/electron-log";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -57,6 +57,17 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
     queryFn: () => apiClient.get<InvoiceDetail>(`/api/invoices/${id}`),
   });
 
+  useEffect(() => {
+    if (invoice) {
+      logToApp("Invoice print page loaded", {
+        invoiceId: invoice.id,
+        itemCount: invoice.items.length,
+        href: typeof window !== "undefined" ? window.location.href : "",
+        hasElectronAPI: typeof window !== "undefined" && !!window.electronAPI?.printInvoice,
+      });
+    }
+  }, [invoice]);
+
   const deleteMutation = useMutation({
     mutationFn: () => apiClient.delete(`/api/invoices/${id}`),
     onSuccess: () => {
@@ -68,20 +79,57 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
   });
 
   const handlePrint = async () => {
-    // Electron: real native print dialog via preload's contextBridge.
-    // Plain browser tab (npm run dev:next only): window.print() fallback.
+    logToApp("Print button clicked", {
+      invoiceId: id,
+      href: window.location.href,
+      hasElectronAPI: !!window.electronAPI?.printInvoice,
+    });
+
     if (typeof window !== "undefined" && window.electronAPI?.printInvoice) {
       try {
-        const res = await window.electronAPI.printInvoice();
-        if (res && !res.success && res.error) {
-          if (res.error !== "Print job canceled") {
-            toast.error(`Printing failed: ${res.error}`);
-          }
+        logToApp("Waiting for print assets (images/fonts)…");
+        const readiness = await waitForPrintAssets();
+        logToApp("Print asset readiness", readiness);
+
+        if (readiness.timedOut) {
+          logToApp("WARNING: Timed out waiting for images — proceeding with print anyway");
         }
-      } catch (err: any) {
-        toast.error(`Print error: ${err.message || "Unknown error"}`);
+        if (readiness.imagesFailed.length > 0) {
+          logToApp("WARNING: Failed to load image(s)", { urls: readiness.imagesFailed });
+        }
+
+        logToApp("Calling electronAPI.printInvoice()");
+        const res = await window.electronAPI.printInvoice({
+          debugContext: {
+            invoiceId: id,
+            ...readiness,
+          },
+        });
+
+        logToApp("printInvoice() returned", {
+          success: res.success,
+          error: res.error ?? null,
+          elapsedMs: res.elapsedMs ?? null,
+          printerUsed: res.printerUsed ?? null,
+        });
+
+        if (res && !res.success && res.error) {
+          if (res.error !== "Print job canceled" && res.error !== "Cancelled") {
+            toast.error(`Printing failed: ${res.error}`);
+          } else {
+            logToApp("Print canceled by user in dialog");
+          }
+        } else if (res?.success) {
+          logToApp("Print reported success");
+          toast.success("Print job sent to printer");
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Unknown error";
+        logToApp("printInvoice() threw", { message });
+        toast.error(`Print error: ${message}`);
       }
     } else {
+      logToApp("electronAPI unavailable — using window.print() browser fallback");
       window.print();
     }
   };
@@ -158,12 +206,15 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
         <div className="space-y-6">
           <div className="flex items-start justify-between">
             <div className="flex items-start gap-3">
-              <Image
+              {/* Plain img — more reliable than next/image for Electron webContents.print() */}
+              <img
                 src="/app-logo.png"
                 alt="Babu Awamir Auto Garage"
-                width={1294}
-                height={556}
                 className="h-16 w-auto shrink-0 object-contain"
+                onLoad={() => logToApp("Invoice logo loaded", { src: "/app-logo.png" })}
+                onError={() =>
+                  logToApp("Invoice logo FAILED to load", { src: "/app-logo.png" })
+                }
               />
               <div>
                 <h2 className="text-lg font-bold tracking-tight">BABU AWAMIR AUTO GARAGE</h2>

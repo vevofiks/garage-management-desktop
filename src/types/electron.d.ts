@@ -1,5 +1,18 @@
+export interface PrintInvoicePayload {
+  options?: Record<string, unknown>;
+  debugContext?: Record<string, unknown>;
+}
+
+export interface PrintInvoiceResult {
+  success: boolean;
+  error?: string | null;
+  elapsedMs?: number;
+  printerUsed?: string | null;
+}
+
 export interface ElectronAPI {
-  printInvoice?: (options?: any) => Promise<{ success: boolean; error?: string | null }>;
+  logToApp?: (payload: { message: string; data?: Record<string, unknown>; at?: string }) => Promise<void>;
+  printInvoice?: (payload?: PrintInvoicePayload) => Promise<PrintInvoiceResult>;
   getAppVersion?: () => Promise<string>;
   checkForUpdates?: () => Promise<{
     status: "error" | "dev-mode" | "latest" | "update-available";
