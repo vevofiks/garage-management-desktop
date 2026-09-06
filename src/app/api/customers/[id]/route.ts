@@ -1,6 +1,6 @@
 import { requireUser } from '@/lib/auth';
 import { ok, badRequest, notFound, withErrorHandling } from '@/lib/http';
-import { customerSchema, normalizeCustomerInput } from '@/lib/schemas/customer';
+import { customerSchema, normalizeCustomerInput, resolveStoredCustomerName, filterMeaningfulVehicleRows } from '@/lib/schemas/customer';
 import { logAudit } from '@/lib/audit';
 import db from '@/lib/db';
 
@@ -20,7 +20,9 @@ export const GET = withErrorHandling<Ctx>(async (req, { params }) => {
   if (!customer) return notFound('Customer not found');
 
   const vehicles = db
-    .prepare('SELECT id, vehicle_number, vehicle_model, created_at FROM vehicles WHERE customer_id = ? ORDER BY created_at ASC')
+    .prepare(
+      'SELECT id, vehicle_number, vehicle_model, driver_name, driver_phone, created_at FROM vehicles WHERE customer_id = ? ORDER BY created_at ASC'
+    )
     .all(id);
 
   // The invoice *is* the service record now (no separate Services module),
@@ -28,12 +30,13 @@ export const GET = withErrorHandling<Ctx>(async (req, { params }) => {
   const invoices = db
     .prepare(
       `SELECT invoices.id, invoices.total_amount, invoices.paid_amount, invoices.payment_status,
+              COALESCE(invoices.service_date, date(invoices.created_at)) AS service_date,
               invoices.created_at, invoices.notes,
               vehicles.vehicle_number, vehicles.vehicle_model
        FROM invoices
        LEFT JOIN vehicles ON vehicles.id = invoices.vehicle_id
        WHERE invoices.customer_id = ?
-       ORDER BY invoices.created_at DESC
+       ORDER BY invoices.service_date DESC, invoices.created_at DESC
        LIMIT ?`
     )
     .all(id, HISTORY_LIMIT);
@@ -58,12 +61,14 @@ export const PATCH = withErrorHandling<Ctx>(async (req, { params }) => {
   if (Number.isNaN(id)) return badRequest('Invalid ID');
 
   const body = await req.json();
-  const { name, phone, address, vehicles } = customerSchema.parse(normalizeCustomerInput(body));
+  const { customer_type, name, phone, address, vehicles } = customerSchema.parse(normalizeCustomerInput(body));
+  const storedName = resolveStoredCustomerName(customer_type, name, vehicles);
+  const rows = filterMeaningfulVehicleRows(vehicles);
 
   const updateTx = db.transaction(() => {
     const result = db
-      .prepare(`UPDATE customers SET name = ?, phone = ?, address = ? WHERE id = ?`)
-      .run(name, phone || null, address || null, id);
+      .prepare(`UPDATE customers SET name = ?, phone = ?, address = ?, customer_type = ? WHERE id = ?`)
+      .run(storedName, phone || null, address || null, customer_type, id);
 
     if (result.changes === 0) return false;
 
@@ -75,20 +80,34 @@ export const PATCH = withErrorHandling<Ctx>(async (req, { params }) => {
     const keptIds = new Set<number>();
 
     const insertVehicle = db.prepare(
-      'INSERT INTO vehicles (customer_id, vehicle_number, vehicle_model) VALUES (?, ?, ?)'
+      'INSERT INTO vehicles (customer_id, vehicle_number, vehicle_model, driver_name, driver_phone) VALUES (?, ?, ?, ?, ?)'
     );
     const updateVehicle = db.prepare(
-      'UPDATE vehicles SET vehicle_number = ?, vehicle_model = ? WHERE id = ? AND customer_id = ?'
+      'UPDATE vehicles SET vehicle_number = ?, vehicle_model = ?, driver_name = ?, driver_phone = ? WHERE id = ? AND customer_id = ?'
     );
 
-    if (vehicles && vehicles.length > 0) {
-      for (const v of vehicles) {
-        if (!v.vehicle_number && !v.vehicle_model) continue;
+    if (rows.length > 0) {
+      for (const v of rows) {
+        const driverName = customer_type === 'company' ? v.driver_name || null : null;
+        const driverPhone = customer_type === 'company' ? v.driver_phone || null : null;
         if (v.id && existingIds.has(v.id)) {
-          updateVehicle.run(v.vehicle_number || null, v.vehicle_model || null, v.id, id);
+          updateVehicle.run(
+            v.vehicle_number || null,
+            v.vehicle_model || null,
+            driverName,
+            driverPhone,
+            v.id,
+            id
+          );
           keptIds.add(v.id);
         } else {
-          const info = insertVehicle.run(id, v.vehicle_number || null, v.vehicle_model || null);
+          const info = insertVehicle.run(
+            id,
+            v.vehicle_number || null,
+            v.vehicle_model || null,
+            driverName,
+            driverPhone
+          );
           keptIds.add(info.lastInsertRowid as number);
         }
       }
@@ -113,7 +132,9 @@ export const PATCH = withErrorHandling<Ctx>(async (req, { params }) => {
 
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(id) as Record<string, unknown>;
   const updatedVehicles = db
-    .prepare('SELECT id, vehicle_number, vehicle_model, created_at FROM vehicles WHERE customer_id = ? ORDER BY created_at ASC')
+    .prepare(
+      'SELECT id, vehicle_number, vehicle_model, driver_name, driver_phone, created_at FROM vehicles WHERE customer_id = ? ORDER BY created_at ASC'
+    )
     .all(id);
 
   return ok({ ...customer, vehicles: updatedVehicles });

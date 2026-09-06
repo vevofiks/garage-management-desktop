@@ -148,8 +148,9 @@ export async function bootstrapCloudDatabase(client?: PoolClient | Pool): Promis
       total_amount NUMERIC NOT NULL DEFAULT 0,
       paid_amount NUMERIC NOT NULL DEFAULT 0,
       payment_status TEXT NOT NULL DEFAULT 'unpaid' CHECK(payment_status IN ('unpaid', 'partial', 'paid')),
-      payment_method TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other')),
+      payment_method TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other', 'credit')),
       payment_method_note TEXT,
+      service_date TEXT,
       created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
     );
@@ -198,12 +199,18 @@ export async function bootstrapCloudDatabase(client?: PoolClient | Pool): Promis
     CREATE INDEX IF NOT EXISTS idx_pg_vehicles_customer_id ON vehicles(customer_id);
     CREATE INDEX IF NOT EXISTS idx_pg_vehicles_number ON vehicles(vehicle_number);
     CREATE INDEX IF NOT EXISTS idx_pg_invoices_customer_id ON invoices(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_pg_invoices_service_date ON invoices(service_date);
     CREATE INDEX IF NOT EXISTS idx_pg_invoices_created_at ON invoices(created_at);
     CREATE INDEX IF NOT EXISTS idx_pg_invoice_items_invoice_id ON invoice_items(invoice_id);
     CREATE INDEX IF NOT EXISTS idx_pg_expenses_category_id ON expenses(category_id);
     CREATE INDEX IF NOT EXISTS idx_pg_expenses_date ON expenses(date);
     CREATE INDEX IF NOT EXISTS idx_pg_audit_logs_created_at ON audit_logs(created_at);
   `);
+
+  await runner.query('ALTER TABLE invoices ADD COLUMN IF NOT EXISTS service_date TEXT');
+  await runner.query(
+    "UPDATE invoices SET service_date = to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') WHERE service_date IS NULL"
+  );
 
   schemaBootstrapped = true;
 }

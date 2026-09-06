@@ -1,6 +1,6 @@
 import { requireUser } from '@/lib/auth';
 import { ok, badRequest, notFound, withErrorHandling } from '@/lib/http';
-import { updateInvoiceSchema } from '@/lib/schemas/invoice';
+import { updateInvoiceSchema, createInvoiceSchema, normalizeCreateInvoiceInput } from '@/lib/schemas/invoice';
 import { computeInvoiceTotal, derivePaymentStatus } from '@/lib/invoice-totals';
 import { logAudit } from '@/lib/audit';
 import db from '@/lib/db';
@@ -18,10 +18,14 @@ export const GET = withErrorHandling<Ctx>(async (req, { params }) => {
   const invoice = db
     .prepare(
       `SELECT
-         invoices.*,
+         invoices.id, invoices.customer_id, invoices.vehicle_id, invoices.notes,
+         invoices.total_amount, invoices.paid_amount, invoices.payment_status,
+         invoices.payment_method, invoices.payment_method_note, invoices.created_at,
+         COALESCE(invoices.service_date, date(invoices.created_at)) AS service_date,
          customers.name AS customer_name, customers.phone AS customer_phone,
-         customers.address AS customer_address,
-         vehicles.vehicle_number, vehicles.vehicle_model
+         customers.address AS customer_address, customers.customer_type,
+         vehicles.vehicle_number, vehicles.vehicle_model,
+         vehicles.driver_name, vehicles.driver_phone
        FROM invoices
        JOIN customers ON customers.id = invoices.customer_id
        LEFT JOIN vehicles ON vehicles.id = invoices.vehicle_id
@@ -38,15 +42,92 @@ export const GET = withErrorHandling<Ctx>(async (req, { params }) => {
 });
 
 export const PATCH = withErrorHandling<Ctx>(async (req, { params }) => {
-  await requireUser();
+  const user = await requireUser();
   const id = parseInt((await params).id, 10);
   if (Number.isNaN(id)) return badRequest('Invalid ID');
 
   const body = await req.json();
-  const { items, paid_amount, payment_method, payment_method_note, notes } = updateInvoiceSchema.parse(body);
+  const isFullUpdate = (body as Record<string, unknown>).customer_id !== undefined;
+
+  if (isFullUpdate) {
+    const {
+      customer_id,
+      vehicle_id,
+      service_date,
+      notes,
+      items,
+      paid_amount,
+      payment_method,
+      payment_method_note,
+    } = createInvoiceSchema.parse(normalizeCreateInvoiceInput(body));
+
+    const existing = db.prepare('SELECT id FROM invoices WHERE id = ?').get(id);
+    if (!existing) return notFound('Invoice not found');
+
+    const customer = db.prepare('SELECT id FROM customers WHERE id = ?').get(customer_id);
+    if (!customer) return badRequest('Customer not found');
+
+    if (vehicle_id) {
+      const vehicle = db
+        .prepare('SELECT id FROM vehicles WHERE id = ? AND customer_id = ?')
+        .get(vehicle_id, customer_id);
+      if (!vehicle) return badRequest('Vehicle does not belong to this customer');
+    }
+
+    const vehicleCount = db
+      .prepare('SELECT COUNT(*) AS count FROM vehicles WHERE customer_id = ?')
+      .get(customer_id) as { count: number };
+    if (vehicleCount.count > 1 && !vehicle_id) {
+      return badRequest('Select a vehicle for this customer');
+    }
+
+    const totalAmount = computeInvoiceTotal(items);
+    const status = derivePaymentStatus(totalAmount, paid_amount);
+
+    const deleteItems = db.prepare('DELETE FROM invoice_items WHERE invoice_id = ?');
+    const insertItem = db.prepare(
+      'INSERT INTO invoice_items (invoice_id, description, type, amount) VALUES (?, ?, ?, ?)'
+    );
+
+    const applyFullUpdate = db.transaction(() => {
+      deleteItems.run(id);
+      for (const item of items) insertItem.run(id, item.description, item.type, item.amount);
+
+      db.prepare(
+        `UPDATE invoices SET
+           customer_id = ?, vehicle_id = ?, service_date = ?, notes = ?,
+           total_amount = ?, paid_amount = ?, payment_status = ?,
+           payment_method = ?, payment_method_note = ?
+         WHERE id = ?`
+      ).run(
+        customer_id,
+        vehicle_id,
+        service_date,
+        notes || null,
+        totalAmount,
+        paid_amount,
+        status,
+        payment_method,
+        payment_method_note || null,
+        id
+      );
+    });
+
+    applyFullUpdate();
+    logAudit(user, 'invoice.updated', `Updated INV-${id}`);
+
+    const invoice = db.prepare('SELECT * FROM invoices WHERE id = ?').get(id);
+    const updatedItems = db
+      .prepare('SELECT id, description, type, amount FROM invoice_items WHERE invoice_id = ? ORDER BY id')
+      .all(id);
+    return ok({ ...(invoice as object), items: updatedItems });
+  }
+
+  const { items, service_date, paid_amount, payment_method, payment_method_note, notes } = updateInvoiceSchema.parse(body);
 
   if (
     items === undefined &&
+    service_date === undefined &&
     paid_amount === undefined &&
     payment_method === undefined &&
     payment_method_note === undefined &&
@@ -112,6 +193,10 @@ export const PATCH = withErrorHandling<Ctx>(async (req, { params }) => {
     if (notes !== undefined) {
       setClauses.push('notes = ?');
       setParams.push(notes || null);
+    }
+    if (service_date !== undefined) {
+      setClauses.push('service_date = ?');
+      setParams.push(service_date);
     }
     db.prepare(`UPDATE invoices SET ${setClauses.join(', ')} WHERE id = ?`).run(...setParams, id);
   });

@@ -1,16 +1,20 @@
 "use client";
 
-import { use, useEffect } from "react";
+import { use, useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeftIcon, PencilIcon, PrinterIcon, TrashIcon } from "lucide-react";
+import { ArrowLeftIcon, DownloadIcon, PencilIcon, PrinterIcon, TrashIcon } from "lucide-react";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
-import { formatCurrency, formatDate } from "@/lib/format";
+import { formatCurrency, formatDateOnly, formatVehiclePrint } from "@/lib/format";
+import { ITEM_TYPE_LABELS } from "@/lib/invoice-line-items";
+import { type CustomerType } from "@/lib/schemas/customer";
+import { formatInvoicePrintCustomerLines } from "@/components/customer-list-cell";
 import { PAYMENT_METHOD_LABELS, type PaymentMethod } from "@/lib/schemas/invoice";
 import { logToApp, waitForPrintAssets } from "@/lib/electron-log";
+import { downloadInvoicePdf } from "@/lib/invoice-download";
 import { Button } from "@/components/ui/button";
 import {
   AlertDialog,
@@ -29,14 +33,18 @@ type InvoiceDetail = {
   customer_name: string;
   customer_phone: string | null;
   customer_address: string | null;
+  customer_type: CustomerType;
   vehicle_number: string | null;
   vehicle_model: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
   total_amount: number;
   paid_amount: number;
   payment_status: "unpaid" | "partial" | "paid";
   payment_method: PaymentMethod;
   payment_method_note: string | null;
   notes: string | null;
+  service_date: string;
   created_at: string;
   items: {
     id: number;
@@ -50,7 +58,10 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
   const { id: idParam } = use(params);
   const id = Number(idParam);
   const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
+  const autoDownloadTriggered = useRef(false);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const { data: invoice, isLoading } = useQuery<InvoiceDetail>({
     queryKey: queryKeys.invoices.detail(id),
@@ -77,6 +88,23 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
     },
     onError: (error: ApiError) => toast.error(error.message || "Failed to delete invoice"),
   });
+
+  const handleDownload = async () => {
+    setIsDownloading(true);
+    try {
+      await downloadInvoicePdf(id);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!invoice || autoDownloadTriggered.current) return;
+    if (searchParams.get("download") !== "1") return;
+    autoDownloadTriggered.current = true;
+    void handleDownload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [invoice, searchParams]);
 
   const handlePrint = async () => {
     logToApp("Print button clicked", {
@@ -167,7 +195,7 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
             variant="outline"
             nativeButton={false}
             render={
-              <Link href={`/invoices/${id}`}>
+              <Link href={`/invoices/${id}/edit`}>
                 <PencilIcon className="size-4" /> Edit
               </Link>
             }
@@ -196,6 +224,9 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
+          <Button variant="outline" onClick={handleDownload} disabled={isDownloading}>
+            <DownloadIcon className="size-4" /> {isDownloading ? "Saving…" : "Download PDF"}
+          </Button>
           <Button onClick={handlePrint}>
             <PrinterIcon className="size-4" /> Print
           </Button>
@@ -225,7 +256,6 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
             </div>
             <div className="text-right">
               <h3 className="text-2xl font-bold tracking-tight text-[#9f1616]">INVOICE</h3>
-              <p className="text-neutral-500">{formatDate(invoice.created_at)}</p>
             </div>
           </div>
 
@@ -238,24 +268,34 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
             </div>
             <div>
               <div className="font-semibold text-[#9f1616]">To</div>
-              <div>{invoice.customer_name}</div>
-              <div className="text-neutral-500">
-                {invoice.customer_address || invoice.customer_phone || "—"}
-              </div>
-              {invoice.customer_address && invoice.customer_phone && (
-                <div className="text-neutral-500">{invoice.customer_phone}</div>
-              )}
+              {formatInvoicePrintCustomerLines({
+                name: invoice.customer_name,
+                customerType: invoice.customer_type,
+                phone: invoice.customer_phone,
+                address: invoice.customer_address,
+                driverName: invoice.driver_name,
+                driverPhone: invoice.driver_phone,
+                vehicleNumber: invoice.vehicle_number,
+                vehicleModel: invoice.vehicle_model,
+              }).map((line, i) => (
+                <div key={i} className={i === 0 ? undefined : "text-neutral-500"}>
+                  {line}
+                </div>
+              ))}
             </div>
           </div>
 
-          <div className="flex items-center justify-between text-sm">
+          <div className="grid grid-cols-1 gap-2 text-sm sm:grid-cols-3">
             <div>
               <span className="font-semibold text-[#9f1616]">Ref:</span> INV-{invoice.id}
             </div>
             <div>
+              <span className="font-semibold text-[#9f1616]">Service Date:</span>{" "}
+              {formatDateOnly(invoice.service_date, invoice.created_at)}
+            </div>
+            <div className="sm:text-right">
               <span className="font-semibold text-[#9f1616]">Vehicle:</span>{" "}
-              {invoice.vehicle_model || "—"}
-              {invoice.vehicle_number ? ` (${invoice.vehicle_number})` : ""}
+              {formatVehiclePrint(invoice.vehicle_number, invoice.vehicle_model)}
             </div>
           </div>
         </div>
@@ -274,7 +314,7 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
               <tr key={item.id} className="border-b border-neutral-200">
                 <td className="py-3 pl-3 text-neutral-500 font-medium">{index + 1}</td>
                 <td className="py-3">{item.description}</td>
-                <td className="py-3 capitalize text-neutral-500">{item.type}</td>
+                <td className="py-3 text-neutral-500">{ITEM_TYPE_LABELS[item.type]}</td>
                 <td className="py-3 pr-3 text-right">
                   {item.type === "discount" ? "-" : ""}
                   {formatCurrency(item.amount)}

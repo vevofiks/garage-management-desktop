@@ -2,22 +2,25 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { PrinterIcon } from "lucide-react";
+import { DownloadIcon, PencilIcon, PrinterIcon } from "lucide-react";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
-import { formatCurrency, formatDate } from "@/lib/format";
+import { formatCurrency, formatDateOnly } from "@/lib/format";
+import { ITEM_TYPE_LABELS } from "@/lib/invoice-line-items";
 import {
-  invoiceItemsSchema,
   paymentSchema,
   PAYMENT_METHOD_LABELS,
-  type InvoiceItemsFormData,
+  RECORDABLE_PAYMENT_METHODS,
   type PaymentFormData,
   type PaymentMethod,
 } from "@/lib/schemas/invoice";
+import { type CustomerType } from "@/lib/schemas/customer";
+import { InvoiceCustomerVehicleSection } from "@/components/customer-list-cell";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,21 +35,33 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { InvoiceItemsField } from "../_components/invoice-items-field";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 
 type InvoiceDetail = {
   id: number;
   customer_id: number;
   customer_name: string;
   customer_phone: string | null;
+  customer_address: string | null;
+  customer_type: CustomerType;
   vehicle_number: string | null;
   vehicle_model: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
   notes: string | null;
   total_amount: number;
   paid_amount: number;
   payment_status: "unpaid" | "partial" | "paid";
   payment_method: PaymentMethod;
   payment_method_note: string | null;
+  service_date: string;
   created_at: string;
   items: { id: number; description: string; type: "part" | "labor" | "discount"; amount: number }[];
 };
@@ -60,24 +75,12 @@ const PAYMENT_BADGE: Record<InvoiceDetail["payment_status"], "default" | "second
 export default function InvoiceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: idParam } = use(params);
   const id = Number(idParam);
+  const router = useRouter();
   const queryClient = useQueryClient();
 
   const { data: invoice, isLoading } = useQuery<InvoiceDetail>({
     queryKey: queryKeys.invoices.detail(id),
     queryFn: () => apiClient.get<InvoiceDetail>(`/api/invoices/${id}`),
-  });
-
-  const {
-    control: itemsControl,
-    register: itemsRegister,
-    handleSubmit: handleItemsSubmit,
-    setValue: setItemsValue,
-    formState: { errors: itemsErrors, isSubmitting: isSavingItems },
-  } = useForm<InvoiceItemsFormData>({
-    resolver: zodResolver(invoiceItemsSchema),
-    values: invoice
-      ? { items: invoice.items.map(({ description, type, amount }) => ({ description, type, amount })) }
-      : undefined,
   });
 
   const {
@@ -89,15 +92,12 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
     formState: { errors: paymentErrors, isSubmitting: isSavingPayment },
   } = useForm<PaymentFormData>({
     resolver: zodResolver(paymentSchema),
-    // Real defaults (not undefined) so the Payment Method Select is
-    // controlled from the very first render — otherwise its `value` starts
-    // `undefined` and flips to a string once `invoice` loads, which Base UI
-    // (like React) rejects as an uncontrolled-to-controlled switch.
     defaultValues: { paid_amount: 0, payment_method: "cash", payment_method_note: "" },
     values: invoice
       ? {
           paid_amount: invoice.paid_amount,
-          payment_method: invoice.payment_method,
+          payment_method:
+            invoice.payment_method === "credit" ? "cash" : invoice.payment_method,
           payment_method_note: invoice.payment_method_note ?? "",
         }
       : undefined,
@@ -126,15 +126,6 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
     queryClient.invalidateQueries({ queryKey: queryKeys.invoices.all });
   };
 
-  const saveItemsMutation = useMutation({
-    mutationFn: (data: InvoiceItemsFormData) => apiClient.patch(`/api/invoices/${id}`, data),
-    onSuccess: () => {
-      invalidateInvoice();
-      toast.success("Items updated");
-    },
-    onError: (error: ApiError) => toast.error(error.message || "Failed to update items"),
-  });
-
   const recordPaymentMutation = useMutation({
     mutationFn: (data: PaymentFormData) => apiClient.patch(`/api/invoices/${id}`, data),
     onSuccess: () => {
@@ -159,51 +150,69 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
     <div className="mx-auto max-w-4xl space-y-6">
       <PageHeader
         title={`INV-${invoice.id}`}
-        description={formatDate(invoice.created_at)}
         backHref="/invoices"
         backLabel="Back to invoices"
         actions={
-          <Button
-            variant="outline"
-            nativeButton={false}
-            render={
-              <Link href={`/invoices/${invoice.id}/print`}>
-                <PrinterIcon className="size-4" /> Print
-              </Link>
-            }
-          />
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => router.push(`/invoices/${id}/edit`)}>
+              <PencilIcon className="size-4" /> Edit
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => router.push(`/invoices/${id}/print?download=1`)}
+            >
+              <DownloadIcon className="size-4" /> Download PDF
+            </Button>
+            <Button
+              variant="outline"
+              nativeButton={false}
+              render={
+                <Link href={`/invoices/${id}/print`}>
+                  <PrinterIcon className="size-4" /> Print
+                </Link>
+              }
+            />
+          </div>
         }
       />
 
       <Card>
         <CardHeader>
+          <CardTitle>Invoice Details</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-2">
+            <div>
+              <dt className="text-muted-foreground">Service Date</dt>
+              <dd className="font-medium">
+                {formatDateOnly(invoice.service_date, invoice.created_at)}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Invoice #</dt>
+              <dd className="font-medium">INV-{invoice.id}</dd>
+            </div>
+          </dl>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>Customer & Vehicle</CardTitle>
         </CardHeader>
-        <CardContent className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-          <div>
-            <div className="text-muted-foreground">Customer</div>
-            <Link href={`/customers/${invoice.customer_id}`} className="hover:underline">
-              {invoice.customer_name}
-            </Link>
-          </div>
-          <div>
-            <div className="text-muted-foreground">Phone</div>
-            <div>{invoice.customer_phone || "—"}</div>
-          </div>
-          <div>
-            <div className="text-muted-foreground">Vehicle Number</div>
-            <div>{invoice.vehicle_number || "—"}</div>
-          </div>
-          <div>
-            <div className="text-muted-foreground">Vehicle Model</div>
-            <div>{invoice.vehicle_model || "—"}</div>
-          </div>
-          {invoice.notes && (
-            <div className="col-span-2 sm:col-span-4">
-              <div className="text-muted-foreground">Notes</div>
-              <div>{invoice.notes}</div>
-            </div>
-          )}
+        <CardContent>
+          <InvoiceCustomerVehicleSection
+            customerId={invoice.customer_id}
+            name={invoice.customer_name}
+            customerType={invoice.customer_type}
+            phone={invoice.customer_phone}
+            address={invoice.customer_address}
+            driverName={invoice.driver_name}
+            driverPhone={invoice.driver_phone}
+            vehicleNumber={invoice.vehicle_number}
+            vehicleModel={invoice.vehicle_model}
+            notes={invoice.notes}
+          />
         </CardContent>
       </Card>
 
@@ -212,22 +221,29 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
           <CardTitle>Items</CardTitle>
         </CardHeader>
         <CardContent>
-          <form
-            onSubmit={handleItemsSubmit((data) => saveItemsMutation.mutate(data))}
-            className="space-y-4"
-          >
-            <InvoiceItemsField
-              control={itemsControl}
-              register={itemsRegister}
-              setValue={setItemsValue}
-              errors={itemsErrors}
-            />
-            <div className="flex justify-end">
-              <Button type="submit" disabled={isSavingItems}>
-                {isSavingItems ? "Saving…" : "Save Items"}
-              </Button>
-            </div>
-          </form>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-10">#</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead>Type</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {invoice.items.map((item, index) => (
+                <TableRow key={item.id}>
+                  <TableCell className="text-muted-foreground">{index + 1}</TableCell>
+                  <TableCell>{item.description}</TableCell>
+                  <TableCell className="text-muted-foreground">{ITEM_TYPE_LABELS[item.type]}</TableCell>
+                  <TableCell className="text-right">
+                    {item.type === "discount" ? "-" : ""}
+                    {formatCurrency(item.amount)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         </CardContent>
       </Card>
 
@@ -255,12 +271,15 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
             <div>
               <dt className="text-muted-foreground">Payment Method</dt>
               <dd className="font-medium">
-                {PAYMENT_METHOD_LABELS[invoice.payment_method]}
-                {(invoice.payment_method === "other" || invoice.payment_method === "both") && invoice.payment_method_note && (
-                  <span className="block font-normal text-muted-foreground">
-                    {invoice.payment_method_note}
-                  </span>
-                )}
+                <Badge variant={invoice.payment_method === "credit" ? "outline" : "secondary"}>
+                  {PAYMENT_METHOD_LABELS[invoice.payment_method]}
+                </Badge>
+                {(invoice.payment_method === "other" || invoice.payment_method === "both") &&
+                  invoice.payment_method_note && (
+                    <span className="mt-1 block font-normal text-muted-foreground">
+                      {invoice.payment_method_note}
+                    </span>
+                  )}
               </dd>
             </div>
           </dl>
@@ -300,13 +319,16 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
                     }}
                     disabled={isSavingPayment}
                   >
-                    <SelectTrigger id="payment_method" className="w-full bg-background font-normal text-muted-foreground data-[state=value]:text-foreground">
+                    <SelectTrigger
+                      id="payment_method"
+                      className="w-full bg-background font-normal text-muted-foreground data-[state=value]:text-foreground"
+                    >
                       <SelectValue>{PAYMENT_METHOD_LABELS[selectedPaymentMethod]}</SelectValue>
                     </SelectTrigger>
                     <SelectContent>
-                      {Object.entries(PAYMENT_METHOD_LABELS).map(([value, label]) => (
+                      {RECORDABLE_PAYMENT_METHODS.map((value) => (
                         <SelectItem key={value} value={value}>
-                          {label}
+                          {PAYMENT_METHOD_LABELS[value]}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -393,9 +415,15 @@ export default function InvoiceDetailPage({ params }: { params: Promise<{ id: st
               <div className="flex justify-between items-center pt-2">
                 {selectedPaymentMethod === "both" ? (
                   <p className="text-xs text-muted-foreground">
-                    Total Paid: <span className="font-semibold text-foreground">QAR {(watchPayment("paid_amount") || 0).toFixed(2)}</span> ({watchPayment("payment_method_note")})
+                    Total Paid:{" "}
+                    <span className="font-semibold text-foreground">
+                      QAR {(watchPayment("paid_amount") || 0).toFixed(2)}
+                    </span>{" "}
+                    ({watchPayment("payment_method_note")})
                   </p>
-                ) : <div />}
+                ) : (
+                  <div />
+                )}
                 <Button type="submit" disabled={isSavingPayment}>
                   {isSavingPayment ? "Saving…" : "Record Payment"}
                 </Button>

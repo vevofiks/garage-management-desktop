@@ -10,11 +10,13 @@ import { toast } from "sonner";
 import { PencilIcon, TrashIcon, PlusIcon } from "lucide-react";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
-import { formatCurrency, formatDate } from "@/lib/format";
-import { vehicleSchema, type VehicleFormData } from "@/lib/schemas/vehicle";
+import { formatCurrency, formatDate, formatDateOnly } from "@/lib/format";
+import { vehicleSchemaForCustomerType, type VehicleFormData } from "@/lib/schemas/vehicle";
+import { CUSTOMER_TYPE_LABELS, formatCustomerDisplayName, type CustomerType } from "@/lib/schemas/customer";
 import { PageHeader } from "@/components/page-header";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -38,11 +40,19 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-type Vehicle = { id: number; vehicle_number: string | null; vehicle_model: string | null; created_at: string };
+type Vehicle = {
+  id: number;
+  vehicle_number: string | null;
+  vehicle_model: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
+  created_at: string;
+};
 
 type CustomerDetail = {
   id: number;
   name: string;
+  customer_type: CustomerType;
   phone: string | null;
   address: string | null;
   created_at: string;
@@ -54,6 +64,7 @@ type CustomerDetail = {
     total_amount: number;
     paid_amount: number;
     payment_status: "unpaid" | "partial" | "paid";
+    service_date: string;
     created_at: string;
     notes: string | null;
     vehicle_number: string | null;
@@ -62,11 +73,13 @@ type CustomerDetail = {
 };
 
 function VehicleForm({
+  isCompany,
   defaultValues,
   onSubmit,
   onCancel,
   isSubmitting,
 }: {
+  isCompany: boolean;
   defaultValues?: Partial<VehicleFormData>;
   onSubmit: (data: VehicleFormData) => void;
   onCancel: () => void;
@@ -77,31 +90,59 @@ function VehicleForm({
     handleSubmit,
     formState: { errors },
   } = useForm<VehicleFormData>({
-    resolver: zodResolver(vehicleSchema),
-    defaultValues: { vehicle_number: "", vehicle_model: "", ...defaultValues },
+    resolver: zodResolver(vehicleSchemaForCustomerType(isCompany ? "company" : "individual")),
+    defaultValues: {
+      driver_name: "",
+      driver_phone: "",
+      vehicle_number: "",
+      vehicle_model: "",
+      ...defaultValues,
+    },
   });
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="flex flex-wrap items-start gap-2">
-      <div className="space-y-1">
-        <Input placeholder="Vehicle number" {...register("vehicle_number")} disabled={isSubmitting} />
-        {errors.vehicle_number && (
-          <p className="text-sm text-destructive">{errors.vehicle_number.message}</p>
-        )}
-      </div>
-      <div className="space-y-1">
-        <Input placeholder="Vehicle model" {...register("vehicle_model")} disabled={isSubmitting} />
-        {errors.vehicle_model && (
-          <p className="text-sm text-destructive">{errors.vehicle_model.message}</p>
-        )}
-      </div>
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" disabled={isSubmitting}>
-          Save
-        </Button>
-        <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={isSubmitting}>
-          Cancel
-        </Button>
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-3 rounded-md border p-3 bg-muted/20">
+      {isCompany && (
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Driver name</Label>
+            <Input placeholder="Driver name" {...register("driver_name")} disabled={isSubmitting} />
+            {errors.driver_name && (
+              <p className="text-sm text-destructive">{errors.driver_name.message}</p>
+            )}
+          </div>
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Driver number</Label>
+            <Input placeholder="Driver number" {...register("driver_phone")} disabled={isSubmitting} />
+            {errors.driver_phone && (
+              <p className="text-sm text-destructive">{errors.driver_phone.message}</p>
+            )}
+          </div>
+        </div>
+      )}
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Vehicle number</Label>
+          <Input placeholder="Vehicle number" {...register("vehicle_number")} disabled={isSubmitting} />
+          {errors.vehicle_number && (
+            <p className="text-sm text-destructive">{errors.vehicle_number.message}</p>
+          )}
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs text-muted-foreground">Vehicle model</Label>
+          <Input placeholder="Vehicle model" {...register("vehicle_model")} disabled={isSubmitting} />
+          {errors.vehicle_model && (
+            <p className="text-sm text-destructive">{errors.vehicle_model.message}</p>
+          )}
+        </div>
+        <div className="flex gap-2 self-end">
+          <Button type="submit" size="sm" disabled={isSubmitting}>
+            Save
+          </Button>
+          <Button type="button" variant="outline" size="sm" onClick={onCancel} disabled={isSubmitting}>
+            Cancel
+          </Button>
+        </div>
       </div>
     </form>
   );
@@ -180,7 +221,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
   return (
     <div className="space-y-6">
       <PageHeader
-        title={customer.name}
+        title={formatCustomerDisplayName(customer.name, customer.customer_type, customer.vehicles)}
         backHref="/customers"
         backLabel="Back to customers"
         actions={
@@ -218,7 +259,15 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
           <div>
-            <div className="text-muted-foreground">Phone</div>
+            <div className="text-muted-foreground">Type</div>
+            <div>
+              <Badge variant="outline">{CUSTOMER_TYPE_LABELS[customer.customer_type]}</Badge>
+            </div>
+          </div>
+          <div>
+            <div className="text-muted-foreground">
+              {customer.customer_type === "company" ? "Company phone" : "Mobile"}
+            </div>
             <div>{customer.phone || "—"}</div>
           </div>
           <div>
@@ -242,11 +291,11 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
-          <CardTitle>Vehicles</CardTitle>
+          <CardTitle>{customer.customer_type === "company" ? "Drivers & Vehicles" : "Vehicles"}</CardTitle>
           {!addingVehicle && (
             <Button variant="outline" size="sm" onClick={() => setAddingVehicle(true)}>
               <PlusIcon className="size-4" />
-              Add Vehicle
+              {customer.customer_type === "company" ? "Add driver" : "Add vehicle"}
             </Button>
           )}
         </CardHeader>
@@ -258,7 +307,10 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
             editingVehicleId === vehicle.id ? (
               <VehicleForm
                 key={vehicle.id}
+                isCompany={customer.customer_type === "company"}
                 defaultValues={{
+                  driver_name: vehicle.driver_name ?? "",
+                  driver_phone: vehicle.driver_phone ?? "",
                   vehicle_number: vehicle.vehicle_number ?? "",
                   vehicle_model: vehicle.vehicle_model ?? "",
                 }}
@@ -272,7 +324,15 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                 className="flex items-center justify-between rounded-md border px-3 py-2 text-sm"
               >
                 <div>
-                  <div className="font-medium">{vehicle.vehicle_number || "—"}</div>
+                  {customer.customer_type === "company" && vehicle.driver_name && (
+                    <div className="font-medium">{vehicle.driver_name}</div>
+                  )}
+                  {customer.customer_type === "company" && vehicle.driver_phone && (
+                    <div className="text-xs text-muted-foreground">{vehicle.driver_phone}</div>
+                  )}
+                  <div className={customer.customer_type === "company" ? "text-sm" : "font-medium"}>
+                    {vehicle.vehicle_number || "—"}
+                  </div>
                   <div className="text-muted-foreground">{vehicle.vehicle_model || "—"}</div>
                 </div>
                 <div className="flex gap-1">
@@ -317,6 +377,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
           )}
           {addingVehicle && (
             <VehicleForm
+              isCompany={customer.customer_type === "company"}
               isSubmitting={addVehicleMutation.isPending}
               onCancel={() => setAddingVehicle(false)}
               onSubmit={(data) => addVehicleMutation.mutate(data)}
@@ -342,7 +403,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                   <TableHead>Total</TableHead>
                   <TableHead>Paid</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead>Date</TableHead>
+                  <TableHead>Service Date</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -378,7 +439,7 @@ export default function CustomerDetailPage({ params }: { params: Promise<{ id: s
                         {invoice.payment_status}
                       </Badge>
                     </TableCell>
-                    <TableCell>{formatDate(invoice.created_at)}</TableCell>
+                    <TableCell>{formatDateOnly(invoice.service_date, invoice.created_at)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

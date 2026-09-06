@@ -191,11 +191,11 @@ export async function syncWithCloud(): Promise<SyncResult> {
       }
 
       // Invoices
-      const localInvoices = db.prepare('SELECT id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, created_at, updated_at FROM invoices').all() as any[];
+      const localInvoices = db.prepare('SELECT id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at, updated_at FROM invoices').all() as any[];
       for (const inv of localInvoices) {
         await client.query(
-          `INSERT INTO invoices (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, created_at, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+          `INSERT INTO invoices (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
            ON CONFLICT (id) DO UPDATE SET
              customer_id = EXCLUDED.customer_id,
              vehicle_id = EXCLUDED.vehicle_id,
@@ -205,6 +205,7 @@ export async function syncWithCloud(): Promise<SyncResult> {
              payment_status = EXCLUDED.payment_status,
              payment_method = EXCLUDED.payment_method,
              payment_method_note = EXCLUDED.payment_method_note,
+             service_date = EXCLUDED.service_date,
              updated_at = EXCLUDED.updated_at`,
           [
             inv.id,
@@ -216,6 +217,7 @@ export async function syncWithCloud(): Promise<SyncResult> {
             inv.payment_status,
             inv.payment_method,
             inv.payment_method_note,
+            inv.service_date,
             inv.created_at,
             inv.updated_at || inv.created_at,
           ]
@@ -339,8 +341,8 @@ export async function syncWithCloud(): Promise<SyncResult> {
       // Pull Invoices
       const remoteInvoices = (await client.query('SELECT * FROM invoices')).rows;
       const insertInvoiceSql = db.prepare(`
-        INSERT INTO invoices (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, created_at, updated_at)
-        VALUES (@id, @customer_id, @vehicle_id, @notes, @total_amount, @paid_amount, @payment_status, @payment_method, @payment_method_note, @created_at, @updated_at)
+        INSERT INTO invoices (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at, updated_at)
+        VALUES (@id, @customer_id, @vehicle_id, @notes, @total_amount, @paid_amount, @payment_status, @payment_method, @payment_method_note, @service_date, @created_at, @updated_at)
         ON CONFLICT(id) DO UPDATE SET
           customer_id = excluded.customer_id,
           vehicle_id = excluded.vehicle_id,
@@ -350,6 +352,7 @@ export async function syncWithCloud(): Promise<SyncResult> {
           payment_status = excluded.payment_status,
           payment_method = excluded.payment_method,
           payment_method_note = excluded.payment_method_note,
+          service_date = excluded.service_date,
           updated_at = excluded.updated_at
       `);
 
@@ -366,6 +369,7 @@ export async function syncWithCloud(): Promise<SyncResult> {
             payment_status: ri.payment_status,
             payment_method: ri.payment_method,
             payment_method_note: ri.payment_method_note,
+            service_date: ri.service_date,
             created_at: ri.created_at instanceof Date ? ri.created_at.toISOString() : ri.created_at,
             updated_at: ri.updated_at instanceof Date ? ri.updated_at.toISOString() : ri.updated_at,
           });

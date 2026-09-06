@@ -7,6 +7,8 @@ import { toast } from "sonner";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import type { CustomerFormData } from "@/lib/schemas/customer";
+import { formatCustomerListName } from "@/lib/customer-list";
+import { CustomerListCell } from "@/components/customer-list-cell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,12 +18,17 @@ type CustomerOption = {
   id: number;
   name: string;
   phone: string | null;
+  customer_type: "individual" | "company";
   vehicle_numbers: string | null;
 };
 
-export type SelectedCustomer = { id: number; name: string };
+export type SelectedCustomer = {
+  id: number;
+  name: string;
+  customer_type?: "individual" | "company";
+};
 
-type CreatedCustomer = { id: number; name: string };
+type CreatedCustomer = { id: number; name: string; customer_type?: "individual" | "company" };
 
 export function CustomerPicker({
   selected,
@@ -61,7 +68,11 @@ export function CustomerPicker({
       apiClient.post<CreatedCustomer>("/api/customers", data),
     onSuccess: (customer) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
-      onSelect({ id: customer.id, name: customer.name });
+      onSelect({
+        id: customer.id,
+        name: formatCustomerListName(customer.name, customer.customer_type),
+        customer_type: customer.customer_type ?? "individual",
+      });
       setAddingCustomer(false);
       setSearch("");
       toast.success("Customer added");
@@ -131,13 +142,27 @@ export function CustomerPicker({
               type="button"
               variant="ghost"
               className="h-auto w-full flex-col items-start justify-start gap-0 px-2 py-1.5 text-left"
-              onClick={() => onSelect({ id: customer.id, name: customer.name })}
+              onClick={() =>
+                onSelect({
+                  id: customer.id,
+                  name: formatCustomerListName(customer.name, customer.customer_type),
+                  customer_type: customer.customer_type ?? "individual",
+                })
+              }
             >
-              <span className="w-full font-medium">{customer.name}</span>
-              <span className="w-full text-xs font-normal text-muted-foreground">
-                {[customer.phone, customer.vehicle_numbers].filter(Boolean).join(" · ") ||
-                  "No contact info"}
-              </span>
+              <CustomerListCell
+                name={customer.name}
+                customerType={customer.customer_type}
+                phone={customer.phone}
+                vehicleSummary={customer.vehicle_numbers}
+                inlineDetails={customer.customer_type === "company"}
+              />
+              {customer.customer_type !== "company" && (
+                <span className="w-full text-xs font-normal text-muted-foreground">
+                  {[customer.phone, customer.vehicle_numbers].filter(Boolean).join(" · ") ||
+                    "No contact info"}
+                </span>
+              )}
             </Button>
           ))}
         {hasMore && (

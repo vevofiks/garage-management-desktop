@@ -183,7 +183,6 @@ let bootstrapped = false;
 
 function bootstrapDatabase(db: SqliteDb) {
   if (bootstrapped) return;
-  bootstrapped = true;
 
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
@@ -234,8 +233,9 @@ function bootstrapDatabase(db: SqliteDb) {
       total_amount    REAL NOT NULL DEFAULT 0,
       paid_amount     REAL NOT NULL DEFAULT 0,
       payment_status  TEXT NOT NULL DEFAULT 'unpaid' CHECK(payment_status IN ('unpaid', 'partial', 'paid')),
-      payment_method  TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other')),
+      payment_method  TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other', 'credit')),
       payment_method_note TEXT,
+      service_date    TEXT NOT NULL DEFAULT (date('now')),
       created_at      TEXT DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -307,6 +307,17 @@ function bootstrapDatabase(db: SqliteDb) {
   if (!currentCustomerColumns.some((c) => c.name === 'vehicle_model')) {
     db.exec('ALTER TABLE customers ADD COLUMN vehicle_model TEXT');
   }
+  if (!currentCustomerColumns.some((c) => c.name === 'customer_type')) {
+    db.exec("ALTER TABLE customers ADD COLUMN customer_type TEXT NOT NULL DEFAULT 'individual'");
+  }
+
+  const currentVehicleColumns = db.prepare('PRAGMA table_info(vehicles)').all() as { name: string }[];
+  if (!currentVehicleColumns.some((c) => c.name === 'driver_name')) {
+    db.exec('ALTER TABLE vehicles ADD COLUMN driver_name TEXT');
+  }
+  if (!currentVehicleColumns.some((c) => c.name === 'driver_phone')) {
+    db.exec('ALTER TABLE vehicles ADD COLUMN driver_phone TEXT');
+  }
 
   const currentExpenseColumns = db.prepare('PRAGMA table_info(expenses)').all() as { name: string }[];
   if (!currentExpenseColumns.some((c) => c.name === 'category_id')) {
@@ -319,10 +330,13 @@ function bootstrapDatabase(db: SqliteDb) {
 
   const currentInvoiceColumns = db.prepare('PRAGMA table_info(invoices)').all() as { name: string }[];
   if (!currentInvoiceColumns.some((c) => c.name === 'payment_method')) {
-    db.exec("ALTER TABLE invoices ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other'))");
+    db.exec("ALTER TABLE invoices ADD COLUMN payment_method TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other', 'credit'))");
   }
   if (!currentInvoiceColumns.some((c) => c.name === 'payment_method_note')) {
     db.exec('ALTER TABLE invoices ADD COLUMN payment_method_note TEXT');
+  }
+  if (!currentInvoiceColumns.some((c) => c.name === 'service_date')) {
+    db.exec('ALTER TABLE invoices ADD COLUMN service_date TEXT');
   }
 
   const invoicesTableSql = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'invoices'").get() as { sql: string } | undefined)?.sql ?? '';
@@ -338,12 +352,13 @@ function bootstrapDatabase(db: SqliteDb) {
           total_amount        REAL NOT NULL DEFAULT 0,
           paid_amount         REAL NOT NULL DEFAULT 0,
           payment_status      TEXT NOT NULL DEFAULT 'unpaid' CHECK(payment_status IN ('unpaid', 'partial', 'paid')),
-          payment_method      TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other')),
+          payment_method      TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other', 'credit')),
           payment_method_note TEXT,
+          service_date        TEXT,
           created_at          TEXT DEFAULT CURRENT_TIMESTAMP
         );
-        INSERT INTO invoices_new (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, created_at)
-        SELECT id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, created_at FROM invoices;
+        INSERT INTO invoices_new (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at)
+        SELECT id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at FROM invoices;
         DROP INDEX IF EXISTS idx_invoices_customer_id;
         DROP INDEX IF EXISTS idx_invoices_vehicle_id;
         DROP TABLE invoices;
@@ -354,6 +369,45 @@ function bootstrapDatabase(db: SqliteDb) {
     })();
     db.pragma('foreign_keys = ON');
   }
+
+  const invoicesTableSqlAfterBoth = (db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'invoices'").get() as { sql: string } | undefined)?.sql ?? '';
+  if (invoicesTableSqlAfterBoth && !invoicesTableSqlAfterBoth.includes("'credit'")) {
+    db.pragma('foreign_keys = OFF');
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE invoices_new (
+          id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+          customer_id         INTEGER NOT NULL REFERENCES customers(id),
+          vehicle_id          INTEGER REFERENCES vehicles(id),
+          notes               TEXT,
+          total_amount        REAL NOT NULL DEFAULT 0,
+          paid_amount         REAL NOT NULL DEFAULT 0,
+          payment_status      TEXT NOT NULL DEFAULT 'unpaid' CHECK(payment_status IN ('unpaid', 'partial', 'paid')),
+          payment_method      TEXT NOT NULL DEFAULT 'cash' CHECK(payment_method IN ('cash', 'card', 'both', 'other', 'credit')),
+          payment_method_note TEXT,
+          service_date        TEXT,
+          created_at          TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO invoices_new (id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at)
+        SELECT id, customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note, service_date, created_at FROM invoices;
+        DROP INDEX IF EXISTS idx_invoices_customer_id;
+        DROP INDEX IF EXISTS idx_invoices_vehicle_id;
+        DROP TABLE invoices;
+        ALTER TABLE invoices_new RENAME TO invoices;
+        CREATE INDEX IF NOT EXISTS idx_invoices_customer_id ON invoices(customer_id);
+        CREATE INDEX IF NOT EXISTS idx_invoices_vehicle_id ON invoices(vehicle_id);
+      `);
+    })();
+    db.pragma('foreign_keys = ON');
+  }
+
+  // service_date — add after table rebuilds so legacy migrations can't drop it again
+  const invoiceColumnsFinal = db.prepare('PRAGMA table_info(invoices)').all() as { name: string }[];
+  if (!invoiceColumnsFinal.some((c) => c.name === 'service_date')) {
+    db.exec('ALTER TABLE invoices ADD COLUMN service_date TEXT');
+  }
+  db.exec("UPDATE invoices SET service_date = date(created_at) WHERE service_date IS NULL OR service_date = ''");
+  db.exec('CREATE INDEX IF NOT EXISTS idx_invoices_service_date ON invoices(service_date)');
 
   db.exec('CREATE INDEX IF NOT EXISTS idx_expenses_category_id ON expenses(category_id)');
 
@@ -453,6 +507,8 @@ function bootstrapDatabase(db: SqliteDb) {
     const defaultPasswordHash = hashPassword('admin123');
     db.prepare('INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)').run('admin', defaultPasswordHash, 'admin');
   }
+
+  bootstrapped = true;
 }
 
 function getRawDb(): SqliteDb {

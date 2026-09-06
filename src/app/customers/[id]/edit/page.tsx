@@ -6,17 +6,24 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
-import type { CustomerFormData } from "@/lib/schemas/customer";
+import type { CustomerFormData, CustomerType } from "@/lib/schemas/customer";
 import { PageHeader } from "@/components/page-header";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CustomerForm } from "../../_components/customer-form";
 
-type Vehicle = { id: number; vehicle_number: string | null; vehicle_model: string | null };
+type Vehicle = {
+  id: number;
+  vehicle_number: string | null;
+  vehicle_model: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
+};
 
 type Customer = {
   id: number;
   name: string;
+  customer_type: CustomerType;
   phone: string | null;
   address: string | null;
   vehicles?: Vehicle[];
@@ -71,6 +78,7 @@ export default function EditCustomerPage({ params }: { params: Promise<{ id: str
               isSubmitting={mutation.isPending}
               showVehiclesSection={true}
               defaultValues={{
+                customer_type: customer.customer_type ?? "individual",
                 name: customer.name,
                 phone: customer.phone ?? "",
                 address: customer.address ?? "",
@@ -78,10 +86,12 @@ export default function EditCustomerPage({ params }: { params: Promise<{ id: str
                   customer.vehicles && customer.vehicles.length > 0
                     ? customer.vehicles.map((v) => ({
                         id: v.id,
+                        driver_name: v.driver_name ?? "",
+                        driver_phone: v.driver_phone ?? "",
                         vehicle_number: v.vehicle_number ?? "",
                         vehicle_model: v.vehicle_model ?? "",
                       }))
-                    : [{ vehicle_number: "", vehicle_model: "" }],
+                    : [{ driver_name: "", driver_phone: "", vehicle_number: "", vehicle_model: "" }],
               }}
               onSubmit={(data) => mutation.mutate(data)}
             />

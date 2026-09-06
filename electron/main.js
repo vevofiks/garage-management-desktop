@@ -330,10 +330,62 @@ ipcMain.handle('log-to-app', (_event, payload = {}) => {
   log(`[PRINT][ui] ${at ? `[${at}] ` : ''}${message || '(no message)'}`, data ? JSON.stringify(data) : '');
 });
 
+async function saveInvoiceAsPdf(win, defaultFilename, startedAt, debugContext = {}) {
+  log('[DOWNLOAD] ========== PDF export started ==========');
+  if (Object.keys(debugContext).length > 0) {
+    log('[DOWNLOAD] Renderer context:', JSON.stringify(debugContext));
+  }
+
+  try {
+    const pdfData = await win.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'A4',
+      margins: { marginType: 'none' },
+    });
+
+    const { canceled, filePath } = await dialog.showSaveDialog(win, {
+      defaultPath: defaultFilename,
+      filters: [{ name: 'PDF Documents', extensions: ['pdf'] }],
+    });
+
+    if (canceled || !filePath) {
+      log('[DOWNLOAD] Save dialog canceled');
+      return { success: false, canceled: true, error: 'Save canceled', elapsedMs: Date.now() - startedAt };
+    }
+
+    fs.writeFileSync(filePath, pdfData);
+    log('[DOWNLOAD] Invoice PDF saved:', filePath);
+    log('[DOWNLOAD] ========== PDF export finished ==========');
+    return { success: true, filePath, elapsedMs: Date.now() - startedAt };
+  } catch (err) {
+    log('[DOWNLOAD] ERROR:', err && err.stack ? err.stack : err);
+    return {
+      success: false,
+      error: (err && err.message) || String(err),
+      elapsedMs: Date.now() - startedAt,
+    };
+  }
+}
+
 ipcMain.handle('print-invoice', async (event, payload = {}) => {
   const customOptions = payload.options || {};
   const debugContext = payload.debugContext || {};
   const startedAt = Date.now();
+
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    log('[PRINT] ERROR: No BrowserWindow found for print request');
+    return { success: false, error: 'No active window found', elapsedMs: Date.now() - startedAt };
+  }
+
+  if (payload.saveAsPdf) {
+    return saveInvoiceAsPdf(
+      win,
+      payload.defaultFilename || 'invoice.pdf',
+      startedAt,
+      debugContext
+    );
+  }
 
   log('[PRINT] ========== Print job started ==========');
   log('[PRINT] App packaged:', app.isPackaged);
@@ -341,12 +393,6 @@ ipcMain.handle('print-invoice', async (event, payload = {}) => {
   log('[PRINT] Electron:', process.versions.electron, '| Chrome:', process.versions.chrome);
   if (Object.keys(debugContext).length > 0) {
     log('[PRINT] Renderer context:', JSON.stringify(debugContext));
-  }
-
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) {
-    log('[PRINT] ERROR: No BrowserWindow found for print request');
-    return { success: false, error: 'No active window found', elapsedMs: Date.now() - startedAt };
   }
 
   const pageUrl = win.webContents.getURL();
@@ -481,6 +527,19 @@ ipcMain.handle('print-invoice', async (event, payload = {}) => {
       });
     }
   });
+});
+
+ipcMain.handle('download-invoice', async (event, payload = {}) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return { success: false, error: 'No active window found', elapsedMs: 0 };
+  }
+  return saveInvoiceAsPdf(
+    win,
+    payload.defaultFilename || 'invoice.pdf',
+    Date.now(),
+    payload.debugContext || {}
+  );
 });
 
 // Auto-updater setup and IPC Handlers

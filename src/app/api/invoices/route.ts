@@ -13,6 +13,7 @@ export const GET = withErrorHandling(async (req) => {
   const to = req.nextUrl.searchParams.get('to');
   const customerId = req.nextUrl.searchParams.get('customer_id');
   const status = req.nextUrl.searchParams.get('status');
+  const paymentMethod = req.nextUrl.searchParams.get('payment_method');
   const { page, pageSize, offset } = parsePagination(req.nextUrl.searchParams);
 
   const conditions: string[] = [];
@@ -27,12 +28,12 @@ export const GET = withErrorHandling(async (req) => {
     params.push(`%${q}%`, idPart, `%${q}%`, `%${q}%`);
   }
   if (from) {
-    conditions.push('invoices.created_at >= ?');
+    conditions.push('invoices.service_date >= ?');
     params.push(from);
   }
   if (to) {
-    conditions.push('invoices.created_at <= ?');
-    params.push(`${to} 23:59:59`);
+    conditions.push('invoices.service_date <= ?');
+    params.push(to);
   }
   if (customerId) {
     conditions.push('invoices.customer_id = ?');
@@ -41,6 +42,10 @@ export const GET = withErrorHandling(async (req) => {
   if (status && status !== 'all') {
     conditions.push('invoices.payment_status = ?');
     params.push(status);
+  }
+  if (paymentMethod && paymentMethod !== 'all') {
+    conditions.push('invoices.payment_method = ?');
+    params.push(paymentMethod);
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -57,15 +62,17 @@ export const GET = withErrorHandling(async (req) => {
 
   const invoices = db
     .prepare(
-      `SELECT
-         invoices.id, invoices.customer_id, invoices.vehicle_id, invoices.total_amount, invoices.paid_amount,
-         invoices.payment_status, invoices.created_at, customers.name AS customer_name,
-         vehicles.vehicle_number, vehicles.vehicle_model
+      `SELECT invoices.id, invoices.customer_id, invoices.vehicle_id, invoices.total_amount, invoices.paid_amount,
+         invoices.payment_status, invoices.payment_method,
+         COALESCE(invoices.service_date, date(invoices.created_at)) AS service_date,
+         invoices.created_at,
+         customers.name AS customer_name, customers.customer_type, customers.phone AS customer_phone,
+         vehicles.vehicle_number, vehicles.vehicle_model, vehicles.driver_name, vehicles.driver_phone
        FROM invoices
        JOIN customers ON customers.id = invoices.customer_id
        LEFT JOIN vehicles ON vehicles.id = invoices.vehicle_id
        ${where}
-       ORDER BY invoices.created_at DESC
+       ORDER BY invoices.service_date DESC, invoices.created_at DESC
        LIMIT ? OFFSET ?`
     )
     .all(...params, pageSize, offset);
@@ -77,7 +84,7 @@ export const POST = withErrorHandling(async (req) => {
   const user = await requireUser();
 
   const body = await req.json();
-  const { customer_id, vehicle_id, notes, items, paid_amount, payment_method, payment_method_note } =
+  const { customer_id, vehicle_id, service_date, notes, items, paid_amount, payment_method, payment_method_note } =
     createInvoiceSchema.parse(normalizeCreateInvoiceInput(body));
 
   const customer = db.prepare('SELECT id, name FROM customers WHERE id = ?').get(customer_id) as
@@ -97,8 +104,8 @@ export const POST = withErrorHandling(async (req) => {
 
   const insertInvoice = db.prepare(
     `INSERT INTO invoices
-       (customer_id, vehicle_id, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       (customer_id, vehicle_id, service_date, notes, total_amount, paid_amount, payment_status, payment_method, payment_method_note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const insertInvoiceItem = db.prepare(
     'INSERT INTO invoice_items (invoice_id, description, type, amount) VALUES (?, ?, ?, ?)'
@@ -108,6 +115,7 @@ export const POST = withErrorHandling(async (req) => {
     const info = insertInvoice.run(
       customer_id,
       vehicle_id,
+      service_date,
       notes || null,
       totalAmount,
       paid_amount,

@@ -2,12 +2,15 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
-import { formatCurrency, formatDate } from "@/lib/format";
+import { formatCurrency, formatDateOnly, formatVehicleShort } from "@/lib/format";
+import { type CustomerType } from "@/lib/schemas/customer";
+import { InvoiceCustomerCell } from "@/components/customer-list-cell";
+import { PAYMENT_METHOD_LABELS, type PaymentMethod } from "@/lib/schemas/invoice";
 import { PageHeader } from "@/components/page-header";
 import { Pagination } from "@/components/pagination";
 import { Button } from "@/components/ui/button";
@@ -45,15 +48,21 @@ type Invoice = {
   id: number;
   customer_id: number;
   customer_name: string;
+  customer_type: CustomerType;
+  customer_phone: string | null;
   vehicle_number: string | null;
   vehicle_model: string | null;
+  driver_name: string | null;
+  driver_phone: string | null;
   total_amount: number;
   paid_amount: number;
   payment_status: "unpaid" | "partial" | "paid";
+  payment_method: PaymentMethod;
+  service_date: string;
   created_at: string;
 };
 
-type StatusFilter = "all" | "unpaid" | "partial" | "paid";
+type StatusFilter = "all" | "unpaid" | "partial" | "paid" | "credit";
 
 type InvoicePage = {
   data: Invoice[];
@@ -70,10 +79,12 @@ const STATUS_BADGE: Record<Invoice["payment_status"], "default" | "secondary" | 
 
 export default function InvoicesPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
-  const [status, setStatus] = useState<StatusFilter>("all");
+  const initialFilter = searchParams.get("filter") === "credit" ? "credit" : "all";
+  const [status, setStatus] = useState<StatusFilter>(initialFilter);
   const [page, setPage] = useState(1);
 
   useEffect(() => {
@@ -81,9 +92,6 @@ export default function InvoicesPage() {
     return () => clearTimeout(timeout);
   }, [search]);
 
-  // A new search term or status filter invalidates whatever page we were on.
-  // Reset during render (React's documented pattern for derived state)
-  // rather than in a useEffect, which would cause an extra render first.
   const filterKey = `${debounced}|${status}`;
   const [prevFilterKey, setPrevFilterKey] = useState(filterKey);
   if (filterKey !== prevFilterKey) {
@@ -91,11 +99,16 @@ export default function InvoicesPage() {
     setPage(1);
   }
 
+  const statusParam = status === "credit" ? "all" : status;
+  const paymentMethodParam = status === "credit" ? "credit" : "all";
+
   const { data: result, isLoading } = useQuery<InvoicePage>({
     queryKey: queryKeys.invoices.list({ q: debounced, status, page }),
     queryFn: () =>
       apiClient.get<InvoicePage>(
-        `/api/invoices?page=${page}&status=${status}${debounced ? `&q=${encodeURIComponent(debounced)}` : ""}`
+        `/api/invoices?page=${page}&status=${statusParam}&payment_method=${paymentMethodParam}${
+          debounced ? `&q=${encodeURIComponent(debounced)}` : ""
+        }`
       ),
   });
   const invoices = result?.data;
@@ -134,6 +147,7 @@ export default function InvoicesPage() {
             <SelectItem value="unpaid">Unpaid</SelectItem>
             <SelectItem value="partial">Partial</SelectItem>
             <SelectItem value="paid">Paid</SelectItem>
+            <SelectItem value="credit">Credit</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -148,8 +162,9 @@ export default function InvoicesPage() {
               <TableHead>Vehicle</TableHead>
               <TableHead>Total</TableHead>
               <TableHead>Paid</TableHead>
+              <TableHead>Method</TableHead>
               <TableHead>Status</TableHead>
-              <TableHead>Date</TableHead>
+              <TableHead>Service Date</TableHead>
               <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
@@ -157,7 +172,7 @@ export default function InvoicesPage() {
             {isLoading &&
               Array.from({ length: 5 }).map((_, i) => (
                 <TableRow key={i}>
-                  {Array.from({ length: 9 }).map((_, j) => (
+                  {Array.from({ length: 10 }).map((_, j) => (
                     <TableCell key={j}>
                       <Skeleton className="h-4 w-full max-w-24" />
                     </TableCell>
@@ -184,20 +199,44 @@ export default function InvoicesPage() {
                       INV-{invoice.id}
                     </Link>
                   </TableCell>
-                  <TableCell>{invoice.customer_name}</TableCell>
                   <TableCell>
-                    {[invoice.vehicle_number, invoice.vehicle_model].filter(Boolean).join(" — ") || "—"}
+                    <InvoiceCustomerCell
+                      name={invoice.customer_name}
+                      customerType={invoice.customer_type}
+                      phone={invoice.customer_phone}
+                      driverName={invoice.driver_name}
+                      driverPhone={invoice.driver_phone}
+                      vehicleNumber={invoice.vehicle_number}
+                      vehicleModel={invoice.vehicle_model}
+                    />
+                  </TableCell>
+                  <TableCell>
+                    {invoice.customer_type === "company"
+                      ? "—"
+                      : formatVehicleShort(invoice.vehicle_number, invoice.vehicle_model)}
                   </TableCell>
                   <TableCell>{formatCurrency(invoice.total_amount)}</TableCell>
                   <TableCell>{formatCurrency(invoice.paid_amount)}</TableCell>
+                  <TableCell>
+                    <Badge variant={invoice.payment_method === "credit" ? "outline" : "secondary"}>
+                      {PAYMENT_METHOD_LABELS[invoice.payment_method]}
+                    </Badge>
+                  </TableCell>
                   <TableCell>
                     <Badge variant={STATUS_BADGE[invoice.payment_status]}>
                       {invoice.payment_status}
                     </Badge>
                   </TableCell>
-                  <TableCell>{formatDate(invoice.created_at)}</TableCell>
+                  <TableCell>{formatDateOnly(invoice.service_date, invoice.created_at)}</TableCell>
                   <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                    <AlertDialog>
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        nativeButton={false}
+                        render={<Link href={`/invoices/${invoice.id}/edit`}>Edit</Link>}
+                      />
+                      <AlertDialog>
                       <AlertDialogTrigger
                         render={
                           <Button variant="destructive" size="sm">
@@ -224,13 +263,14 @@ export default function InvoicesPage() {
                         </AlertDialogFooter>
                       </AlertDialogContent>
                     </AlertDialog>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
 
             {!isLoading && invoices?.length === 0 && (
               <TableRow>
-                <TableCell colSpan={9} className="text-center py-6 text-muted-foreground">
+                <TableCell colSpan={10} className="text-center py-6 text-muted-foreground">
                   {debounced || status !== "all" ? "No invoices match your filters." : "No invoices yet."}
                 </TableCell>
               </TableRow>

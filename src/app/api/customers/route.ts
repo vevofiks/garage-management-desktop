@@ -1,7 +1,13 @@
 import { requireUser } from '@/lib/auth';
 import { ok, paginated, parsePagination, withErrorHandling } from '@/lib/http';
-import { customerSchema, normalizeCustomerInput } from '@/lib/schemas/customer';
+import {
+  customerSchema,
+  normalizeCustomerInput,
+  resolveStoredCustomerName,
+  filterMeaningfulVehicleRows,
+} from '@/lib/schemas/customer';
 import { logAudit } from '@/lib/audit';
+import { CUSTOMER_VEHICLE_LIST_SQL } from '@/lib/customer-list';
 import db from '@/lib/db';
 
 export const GET = withErrorHandling(async (req) => {
@@ -12,9 +18,13 @@ export const GET = withErrorHandling(async (req) => {
 
   const where = q
     ? `WHERE customers.name LIKE ? OR customers.phone LIKE ?
-         OR customers.id IN (SELECT customer_id FROM vehicles WHERE vehicle_number LIKE ? OR vehicle_model LIKE ?)`
+         OR customers.id IN (
+           SELECT customer_id FROM vehicles
+           WHERE vehicle_number LIKE ? OR vehicle_model LIKE ?
+              OR driver_name LIKE ? OR driver_phone LIKE ?
+         )`
     : '';
-  const whereParams = q ? [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`] : [];
+  const whereParams = q ? [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`] : [];
 
   const { total } = db
     .prepare(`SELECT COUNT(*) AS total FROM customers ${where}`)
@@ -25,19 +35,8 @@ export const GET = withErrorHandling(async (req) => {
   // the full per-vehicle detail lives on the customer detail page.
   const customers = db
     .prepare(
-      `SELECT customers.id, customers.name, customers.phone, customers.created_at,
-              GROUP_CONCAT(
-                CASE
-                  WHEN vehicles.vehicle_number IS NOT NULL AND vehicles.vehicle_number != '' AND vehicles.vehicle_model IS NOT NULL AND vehicles.vehicle_model != ''
-                    THEN vehicles.vehicle_number || ' (' || vehicles.vehicle_model || ')'
-                  WHEN vehicles.vehicle_number IS NOT NULL AND vehicles.vehicle_number != ''
-                    THEN vehicles.vehicle_number
-                  WHEN vehicles.vehicle_model IS NOT NULL AND vehicles.vehicle_model != ''
-                    THEN vehicles.vehicle_model
-                  ELSE NULL
-                END,
-                ', '
-              ) AS vehicle_numbers
+      `SELECT customers.id, customers.name, customers.phone, customers.customer_type, customers.created_at,
+              ${CUSTOMER_VEHICLE_LIST_SQL}
        FROM customers
        LEFT JOIN vehicles ON vehicles.customer_id = customers.id
        ${where}
@@ -54,23 +53,29 @@ export const POST = withErrorHandling(async (req) => {
   const user = await requireUser();
 
   const body = await req.json();
-  const { name, phone, address, vehicles } = customerSchema.parse(normalizeCustomerInput(body));
+  const { customer_type, name, phone, address, vehicles } = customerSchema.parse(normalizeCustomerInput(body));
+  const storedName = resolveStoredCustomerName(customer_type, name, vehicles);
+  const rows = filterMeaningfulVehicleRows(vehicles);
 
   const createCustomer = db.transaction(() => {
     const info = db
-      .prepare(`INSERT INTO customers (name, phone, address) VALUES (?, ?, ?)`)
-      .run(name, phone || null, address || null);
+      .prepare(`INSERT INTO customers (name, phone, address, customer_type) VALUES (?, ?, ?, ?)`)
+      .run(storedName, phone || null, address || null, customer_type);
 
     const customerId = info.lastInsertRowid as number;
 
-    if (vehicles && vehicles.length > 0) {
+    if (rows.length > 0) {
       const insertVehicle = db.prepare(
-        'INSERT INTO vehicles (customer_id, vehicle_number, vehicle_model) VALUES (?, ?, ?)'
+        'INSERT INTO vehicles (customer_id, vehicle_number, vehicle_model, driver_name, driver_phone) VALUES (?, ?, ?, ?, ?)'
       );
-      for (const v of vehicles) {
-        if (v.vehicle_number || v.vehicle_model) {
-          insertVehicle.run(customerId, v.vehicle_number || null, v.vehicle_model || null);
-        }
+      for (const v of rows) {
+        insertVehicle.run(
+          customerId,
+          v.vehicle_number || null,
+          v.vehicle_model || null,
+          customer_type === 'company' ? v.driver_name || null : null,
+          customer_type === 'company' ? v.driver_phone || null : null
+        );
       }
     }
 
@@ -79,7 +84,7 @@ export const POST = withErrorHandling(async (req) => {
 
   const customerId = createCustomer();
 
-  logAudit(user, 'customer.created', `Created customer "${name}"`);
+  logAudit(user, 'customer.created', `Created customer "${storedName}"`);
   const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
   return ok(customer, { status: 201 });
 });

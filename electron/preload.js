@@ -11,6 +11,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   logToApp: (payload) => ipcRenderer.invoke('log-to-app', payload),
   printInvoice: (payload) => ipcRenderer.invoke('print-invoice', payload),
+  // Route through print-invoice so PDF works even when the dedicated handler
+  // hasn't been picked up yet (Electron main doesn't hot-reload in dev).
+  downloadInvoice: (payload) =>
+    ipcRenderer.invoke('print-invoice', { ...payload, saveAsPdf: true }),
   getAppVersion: () => ipcRenderer.invoke('get-app-version'),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   downloadUpdate: () => ipcRenderer.invoke('download-update'),

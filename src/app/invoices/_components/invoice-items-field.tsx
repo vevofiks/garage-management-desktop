@@ -13,28 +13,33 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { PredefinedServiceSelect } from "@/components/predefined-service-select";
 import { formatCurrency } from "@/lib/format";
-import { computeInvoiceTotal } from "@/lib/invoice-totals";
-import type { InvoiceItemFormData } from "@/lib/schemas/invoice";
+import {
+  CHARGE_TYPE_LABELS,
+  computeFormLineItemsTotal,
+  defaultDiscountLine,
+  defaultServiceLine,
+  type ChargeType,
+  type FormLineItem,
+} from "@/lib/invoice-line-items";
 
-// `items` optional for the same reason as ServiceItemsField's ItemsFormShape
-// (see that file) — keeps this usable from both the create flow and the
-// invoice detail page's edit-items form without the two needing identical
-// required-ness on every other field.
-type ItemsFormShape = { items?: InvoiceItemFormData[] };
+type ItemsFormShape = { items?: FormLineItem[] };
+
+const numberInputProps = {
+  setValueAs: (v: string) => (v === "" ? 0 : Number(v)),
+};
 
 /**
- * The invoice line-item editor — same generic-narrowing approach as Phase
- * 3's ServiceItemsField (see that file for why).
- *
- * Regular rows are billed as labor and pick their description from the
- * shared predefined-services catalog — there's no per-row part/labor
- * toggle to fill in. Discount is added as its own row kind via the
- * dedicated button below (locked to that type, with a plain text label
- * instead of a catalog pick — "Loyalty discount" is a one-off label, not a
- * repeatable job), rather than a type Select on every row that's almost
- * always going to say "labor" anyway.
+ * Invoice line-item editor with per-row charge type: Labor, Parts, or Both.
+ * "Both" shows separate parts and labor amount fields; saved as two API rows.
  */
 export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
   control,
@@ -54,20 +59,27 @@ export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
   const { fields, append, remove } = useFieldArray({ control: itemsControl, name: "items" });
   const items = useWatch({ control: itemsControl, name: "items" });
 
-  const total = computeInvoiceTotal(items ?? []);
-  // react-hook-form nests an array-level error (e.g. the schema's
-  // `.min(1, 'Add at least one line item')`) under `.root`, not directly on
-  // `errors.items` — `errors.items` itself indexes the per-row field errors
-  // instead. Reading `errors.items?.message` (as this used to) is always
-  // undefined, which silently swallowed every validation error on this
-  // field: a row left with no description (required — the predefined-
-  // service picker starts empty) or a non-numeric amount blocked submission
-  // with zero visible feedback, indistinguishable from the button just not
-  // working.
+  const total = Math.max(0, computeFormLineItemsTotal(items ?? []));
   const itemsRootError = (errors.items as { root?: { message?: string } } | undefined)?.root;
   const itemErrors = errors.items as
-    | { [index: number]: { description?: { message?: string }; amount?: { message?: string } } }
+    | {
+        [index: number]: {
+          description?: { message?: string };
+          laborAmount?: { message?: string };
+          partAmount?: { message?: string };
+          amount?: { message?: string };
+        };
+      }
     | undefined;
+
+  const handleChargeTypeChange = (index: number, chargeType: ChargeType) => {
+    itemsSetValue(`items.${index}.chargeType`, chargeType, { shouldValidate: true });
+    if (chargeType === "labor") {
+      itemsSetValue(`items.${index}.partAmount`, 0);
+    } else if (chargeType === "part") {
+      itemsSetValue(`items.${index}.laborAmount`, 0);
+    }
+  };
 
   return (
     <div className="space-y-3">
@@ -78,7 +90,7 @@ export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => append({ description: "", type: "labor", amount: 0 })}
+            onClick={() => append(defaultServiceLine())}
           >
             <Plus className="size-4" /> Add Item
           </Button>
@@ -86,7 +98,7 @@ export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
             type="button"
             variant="outline"
             size="sm"
-            onClick={() => append({ description: "Loyalty Discount", type: "discount", amount: 0 })}
+            onClick={() => append(defaultDiscountLine())}
           >
             <Plus className="size-4" /> Discount
           </Button>
@@ -95,23 +107,46 @@ export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
 
       <div className="space-y-2">
         {fields.map((field, index) => {
-          const itemType = items?.[index]?.type ?? "labor";
-          const isCatalogType = itemType === "part" || itemType === "labor";
-
+          const row = items?.[index];
+          const isService = row?.kind === "service";
+          const chargeType = isService ? row.chargeType : null;
           const rowError = itemErrors?.[index];
 
           return (
             <div key={field.id} className="space-y-1">
-              <div className="flex items-start gap-2">
-                {!isCatalogType && (
-                  <Badge variant="secondary" className="mt-2 w-16 shrink-0 justify-center capitalize">
-                    {itemType}
+              <div className="flex flex-wrap items-start gap-2">
+                {isService ? (
+                  <div className="w-28 shrink-0">
+                    <Select
+                      value={chargeType ?? "labor"}
+                      onValueChange={(val) => {
+                        if (val) handleChargeTypeChange(index, val as ChargeType);
+                      }}
+                    >
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {(Object.entries(CHARGE_TYPE_LABELS) as [ChargeType, string][]).map(
+                          ([value, label]) => (
+                            <SelectItem key={value} value={value}>
+                              {label}
+                            </SelectItem>
+                          )
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : (
+                  <Badge variant="secondary" className="mt-2 w-28 shrink-0 justify-center">
+                    Discount
                   </Badge>
                 )}
-                <div className="flex-1">
-                  {isCatalogType ? (
+
+                <div className="min-w-[12rem] flex-1">
+                  {isService ? (
                     <PredefinedServiceSelect
-                      value={items?.[index]?.description ?? ""}
+                      value={row?.description ?? ""}
                       onChange={(name) => itemsSetValue(`items.${index}.description`, name)}
                     />
                   ) : (
@@ -121,16 +156,59 @@ export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
                     />
                   )}
                 </div>
-                <div className="w-28 shrink-0">
-                  <Input
-                    type="number"
-                    step="0.01"
-                    placeholder="0.00"
-                    {...itemsRegister(`items.${index}.amount`, {
-                    setValueAs: (v) => (v === "" ? 0 : Number(v)),
-                  })}
-                  />
-                </div>
+
+                {isService && chargeType === "both" ? (
+                  <>
+                    <div className="w-28 shrink-0 space-y-1">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        placeholder="Parts"
+                        aria-label="Parts amount"
+                        {...itemsRegister(`items.${index}.partAmount`, numberInputProps)}
+                      />
+                    </div>
+                    <div className="w-28 shrink-0 space-y-1">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        placeholder="Labor"
+                        aria-label="Labor amount"
+                        {...itemsRegister(`items.${index}.laborAmount`, numberInputProps)}
+                      />
+                    </div>
+                  </>
+                ) : isService && chargeType === "part" ? (
+                  <div className="w-28 shrink-0">
+                    <Input
+                      type="number"
+                      step="0.01"
+                      placeholder="Parts"
+                      aria-label="Parts amount"
+                      {...itemsRegister(`items.${index}.partAmount`, numberInputProps)}
+                    />
+                  </div>
+                ) : isService ? (
+                  <div className="w-28 shrink-0">
+                    <Input
+                      type="number"
+                      step="0.01"
+                      placeholder="Labor"
+                      aria-label="Labor amount"
+                      {...itemsRegister(`items.${index}.laborAmount`, numberInputProps)}
+                    />
+                  </div>
+                ) : (
+                  <div className="w-28 shrink-0">
+                    <Input
+                      type="number"
+                      step="0.01"
+                      placeholder="0.00"
+                      {...itemsRegister(`items.${index}.amount`, numberInputProps)}
+                    />
+                  </div>
+                )}
+
                 <Button
                   type="button"
                   variant="ghost"
@@ -142,9 +220,16 @@ export function InvoiceItemsField<TFieldValues extends ItemsFormShape>({
                   <Trash2 className="size-4" />
                 </Button>
               </div>
-              {(rowError?.description?.message || rowError?.amount?.message) && (
+
+              {(rowError?.description?.message ||
+                rowError?.laborAmount?.message ||
+                rowError?.partAmount?.message ||
+                rowError?.amount?.message) && (
                 <p className="pl-1 text-sm text-destructive">
-                  {rowError?.description?.message || rowError?.amount?.message}
+                  {rowError?.description?.message ||
+                    rowError?.laborAmount?.message ||
+                    rowError?.partAmount?.message ||
+                    rowError?.amount?.message}
                 </p>
               )}
             </div>

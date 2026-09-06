@@ -7,11 +7,14 @@ import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
 import { formatDate } from "@/lib/format";
+import { CUSTOMER_TYPE_LABELS, type CustomerType } from "@/lib/schemas/customer";
+import { CustomerListCell, CustomerVehicleListCell } from "@/components/customer-list-cell";
 import { useHotkey } from "@/hooks/use-hotkey";
 import { PageHeader } from "@/components/page-header";
 import { Pagination } from "@/components/pagination";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -26,6 +29,7 @@ type Customer = {
   id: number;
   name: string;
   phone: string | null;
+  customer_type: CustomerType;
   vehicle_numbers: string | null;
   created_at: string;
 };
@@ -92,8 +96,9 @@ export default function CustomersPage() {
             <TableRow>
               <TableHead className="w-12">#</TableHead>
               <TableHead>Name</TableHead>
+              <TableHead>Type</TableHead>
               <TableHead>Phone</TableHead>
-              <TableHead>Vehicles</TableHead>
+              <TableHead>Drivers / Vehicles</TableHead>
               <TableHead>Added</TableHead>
             </TableRow>
           </TableHeader>
@@ -101,7 +106,7 @@ export default function CustomersPage() {
             {isLoading &&
               Array.from({ length: 5 }).map((_, i) => (
                 <TableRow key={i}>
-                  {Array.from({ length: 5 }).map((_, j) => (
+                  {Array.from({ length: 6 }).map((_, j) => (
                     <TableCell key={j}>
                       <Skeleton className="h-4 w-full max-w-32" />
                     </TableCell>
@@ -125,18 +130,37 @@ export default function CustomersPage() {
                       className="hover:underline"
                       onClick={(e) => e.stopPropagation()}
                     >
-                      {customer.name}
+                      <CustomerListCell
+                        name={customer.name}
+                        customerType={customer.customer_type}
+                      />
                     </Link>
                   </TableCell>
-                  <TableCell>{customer.phone || "—"}</TableCell>
-                  <TableCell>{customer.vehicle_numbers || "—"}</TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="text-xs">
+                      {CUSTOMER_TYPE_LABELS[customer.customer_type ?? "individual"]}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {customer.customer_type === "company" ? (
+                      customer.phone || <span className="text-muted-foreground">—</span>
+                    ) : (
+                      customer.phone || "—"
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    <CustomerVehicleListCell
+                      customerType={customer.customer_type}
+                      vehicleSummary={customer.vehicle_numbers}
+                    />
+                  </TableCell>
                   <TableCell>{formatDate(customer.created_at)}</TableCell>
                 </TableRow>
               ))}
 
             {!isLoading && customers?.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center py-6 text-muted-foreground">
+                <TableCell colSpan={6} className="text-center py-6 text-muted-foreground">
                   {debouncedSearch ? "No customers match your search." : "No customers yet."}
                 </TableCell>
               </TableRow>
