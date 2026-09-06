@@ -44,6 +44,7 @@ export default function NewInvoicePage() {
   const searchParams = useSearchParams();
   const queryClient = useQueryClient();
   const [selectedCustomer, setSelectedCustomer] = useState<SelectedCustomer | null>(null);
+  const [vehicleError, setVehicleError] = useState<string | null>(null);
 
   // Arriving from a "Create Invoice" action on a specific customer (e.g. the
   // dashboard's Recent Customers row) — skip the picker and go straight to
@@ -81,6 +82,7 @@ export default function NewInvoicePage() {
     setSelectedCustomer(customer);
     setValue("customer_id", customer?.id ?? 0, { shouldValidate: true });
     setValue("vehicle_id", null);
+    setVehicleError(null);
   };
 
   useEffect(() => {
@@ -96,13 +98,31 @@ export default function NewInvoicePage() {
     enabled: !!selectedCustomer,
   });
 
-  // A customer with exactly one vehicle on file doesn't need to pick it —
-  // preselect it so the common case stays a one-step flow.
+  // One vehicle on file — preselect silently. Multiple vehicles — user must pick.
   useEffect(() => {
     if (vehicles?.length === 1) {
       setValue("vehicle_id", vehicles[0].id);
+      setVehicleError(null);
+    } else if (vehicles && vehicles.length > 1) {
+      setValue("vehicle_id", null);
     }
   }, [vehicles, setValue]);
+
+  const hasMultipleVehicles = !!vehicles && vehicles.length > 1;
+  const selectedVehicleId = watch("vehicle_id");
+  const selectedVehicleLabel =
+    selectedVehicleId && vehicles
+      ? vehicles.find((v) => v.id === selectedVehicleId)
+      : null;
+
+  const onSubmit = (data: CreateInvoiceInput) => {
+    if (hasMultipleVehicles && !data.vehicle_id) {
+      setVehicleError("Select a vehicle for this customer");
+      return;
+    }
+    setVehicleError(null);
+    mutation.mutate(data);
+  };
 
   const mutation = useMutation({
     mutationFn: (data: CreateInvoiceInput) => apiClient.post<{ id: number }>("/api/invoices", data),
@@ -143,33 +163,49 @@ export default function NewInvoicePage() {
           <CardTitle>Invoice details</CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit((data) => mutation.mutate(data))} className="space-y-6">
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
             <div className="space-y-2">
               <Label>Customer</Label>
-              <CustomerPicker selected={selectedCustomer} onSelect={handleSelectCustomer} />
+              <CustomerPicker
+                selected={selectedCustomer}
+                onSelect={handleSelectCustomer}
+                allowCreate
+              />
               {errors.customer_id && (
                 <p className="text-sm text-destructive">{errors.customer_id.message}</p>
               )}
             </div>
 
-            {selectedCustomer && vehicles && vehicles.length > 0 && (
+            {selectedCustomer && hasMultipleVehicles && (
               <div className="space-y-2">
                 <Label htmlFor="vehicle_id">Vehicle</Label>
-                <select
-                  id="vehicle_id"
-                  className="border-input flex h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-xs"
-                  value={watch("vehicle_id") ?? ""}
-                  onChange={(e) => setValue("vehicle_id", e.target.value ? Number(e.target.value) : null)}
+                <Select
+                  value={selectedVehicleId ? String(selectedVehicleId) : ""}
+                  onValueChange={(val) => {
+                    setValue("vehicle_id", val ? Number(val) : null, { shouldValidate: true });
+                    setVehicleError(null);
+                  }}
                   disabled={isSubmitting}
                 >
-                  <option value="">No specific vehicle</option>
-                  {vehicles.map((vehicle) => (
-                    <option key={vehicle.id} value={vehicle.id}>
-                      {[vehicle.vehicle_number, vehicle.vehicle_model].filter(Boolean).join(" — ") ||
-                        `Vehicle #${vehicle.id}`}
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger id="vehicle_id" className="w-full">
+                    <SelectValue placeholder="Select a vehicle">
+                      {selectedVehicleLabel
+                        ? [selectedVehicleLabel.vehicle_number, selectedVehicleLabel.vehicle_model]
+                            .filter(Boolean)
+                            .join(" — ") || `Vehicle #${selectedVehicleLabel.id}`
+                        : undefined}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    {vehicles!.map((vehicle) => (
+                      <SelectItem key={vehicle.id} value={String(vehicle.id)}>
+                        {[vehicle.vehicle_number, vehicle.vehicle_model].filter(Boolean).join(" — ") ||
+                          `Vehicle #${vehicle.id}`}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {vehicleError && <p className="text-sm text-destructive">{vehicleError}</p>}
               </div>
             )}
 

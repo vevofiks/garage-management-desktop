@@ -1,12 +1,16 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { apiClient } from "@/lib/api-client";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { PlusIcon, SearchIcon } from "lucide-react";
+import { toast } from "sonner";
+import { apiClient, ApiError } from "@/lib/api-client";
 import { queryKeys } from "@/lib/query-keys";
+import type { CustomerFormData } from "@/lib/schemas/customer";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { CustomerForm } from "@/app/customers/_components/customer-form";
 
 type CustomerOption = {
   id: number;
@@ -17,16 +21,22 @@ type CustomerOption = {
 
 export type SelectedCustomer = { id: number; name: string };
 
+type CreatedCustomer = { id: number; name: string };
+
 export function CustomerPicker({
   selected,
   onSelect,
+  allowCreate = false,
 }: {
   selected: SelectedCustomer | null;
   onSelect: (customer: SelectedCustomer | null) => void;
+  allowCreate?: boolean;
 }) {
+  const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [debounced, setDebounced] = useState("");
   const [showAll, setShowAll] = useState(false);
+  const [addingCustomer, setAddingCustomer] = useState(false);
 
   useEffect(() => {
     const timeout = setTimeout(() => setDebounced(search), 250);
@@ -39,12 +49,27 @@ export function CustomerPicker({
       apiClient.get<{ data: CustomerOption[] }>(
         `/api/customers?page_size=50${debounced ? `&q=${encodeURIComponent(debounced)}` : ""}`
       ),
-    enabled: !selected,
+    enabled: !selected && !addingCustomer,
   });
   const customers = page?.data;
 
   const displayedCustomers = debounced || showAll ? customers : customers?.slice(0, 5);
   const hasMore = !debounced && !showAll && customers && customers.length > 5;
+
+  const createMutation = useMutation({
+    mutationFn: (data: CustomerFormData) =>
+      apiClient.post<CreatedCustomer>("/api/customers", data),
+    onSuccess: (customer) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.customers.all });
+      onSelect({ id: customer.id, name: customer.name });
+      setAddingCustomer(false);
+      setSearch("");
+      toast.success("Customer added");
+    },
+    onError: (error: ApiError) => {
+      toast.error(error.message || "Failed to add customer");
+    },
+  });
 
   if (selected) {
     return (
@@ -53,6 +78,31 @@ export function CustomerPicker({
         <Button type="button" variant="ghost" size="sm" onClick={() => onSelect(null)}>
           Change
         </Button>
+      </div>
+    );
+  }
+
+  if (allowCreate && addingCustomer) {
+    return (
+      <div className="space-y-3 rounded-md border p-4">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-medium">Add customer</p>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => setAddingCustomer(false)}
+          >
+            <SearchIcon className="size-4" />
+            Search existing
+          </Button>
+        </div>
+        <CustomerForm
+          submitLabel="Save & select customer"
+          isSubmitting={createMutation.isPending}
+          onSubmit={(data) => createMutation.mutate(data)}
+        />
       </div>
     );
   }
@@ -71,7 +121,7 @@ export function CustomerPicker({
         {isLoading && <Skeleton className="h-8 w-full" />}
         {!isLoading && customers?.length === 0 && (
           <p className="px-2 py-1.5 text-sm text-muted-foreground">
-            {debounced ? "No customers found." : "No customers yet — add one first."}
+            {debounced ? "No customers found." : "No customers yet — add one below."}
           </p>
         )}
         {!isLoading &&
@@ -102,6 +152,19 @@ export function CustomerPicker({
           </Button>
         )}
       </div>
+
+      {allowCreate && (
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-full gap-1.5"
+          onClick={() => setAddingCustomer(true)}
+        >
+          <PlusIcon className="size-4" />
+          Add new customer
+        </Button>
+      )}
     </div>
   );
 }
