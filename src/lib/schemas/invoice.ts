@@ -77,27 +77,6 @@ const createInvoiceBaseSchema = z.object({
   payment_method_note: z.string().trim().max(200),
 });
 
-function applyInvoicePaymentRefines<T extends z.ZodTypeAny>(schema: T) {
-  return schema
-    .refine(
-      (data: { payment_method: PaymentMethod; payment_method_note: string }) =>
-        (data.payment_method !== 'other' && data.payment_method !== 'both') ||
-        data.payment_method_note !== '',
-      {
-        message: 'Payment details required',
-        path: ['payment_method_note'],
-      }
-    )
-    .refine(
-      (data: { payment_method: PaymentMethod; paid_amount: number }) =>
-        data.payment_method !== 'credit' || data.paid_amount === 0,
-      {
-        message: 'Credit invoices must have zero amount paid',
-        path: ['paid_amount'],
-      }
-    );
-}
-
 /**
  * POST /api/invoices body. There is no "Services" module to bill from — an
  * invoice is the only record of work done, created directly for a customer
@@ -106,13 +85,24 @@ function applyInvoicePaymentRefines<T extends z.ZodTypeAny>(schema: T) {
  * fields the invoice detail page's "Record a Payment" form edits later —
  * since a garage invoice is very often paid on the spot, at creation time.
  */
-export const createInvoiceSchema = applyInvoicePaymentRefines(createInvoiceBaseSchema).refine(
-  (data) => data.paid_amount <= computeInvoiceTotal(data.items),
-  {
+export const createInvoiceSchema = createInvoiceBaseSchema
+  .refine(
+    (data) =>
+      (data.payment_method !== 'other' && data.payment_method !== 'both') ||
+      data.payment_method_note !== '',
+    {
+      message: 'Payment details required',
+      path: ['payment_method_note'],
+    }
+  )
+  .refine((data) => data.payment_method !== 'credit' || data.paid_amount === 0, {
+    message: 'Credit invoices must have zero amount paid',
+    path: ['paid_amount'],
+  })
+  .refine((data) => data.paid_amount <= computeInvoiceTotal(data.items), {
     message: 'Amount paid cannot be more than the invoice total',
     path: ['paid_amount'],
-  }
-);
+  });
 
 export type CreateInvoiceInput = z.infer<typeof createInvoiceSchema>;
 
@@ -156,13 +146,27 @@ const formLineItemSchema = z.discriminatedUnion('kind', [
   formDiscountLineSchema,
 ]);
 
+const invoiceFormBaseSchema = createInvoiceBaseSchema.omit({ items: true }).extend({
+  items: z.array(formLineItemSchema).min(1, 'Add at least one line item'),
+});
+
 /** Invoice create/edit form — line items use charge-type rows that flatten to
  * part/labor API items on submit. */
-export const invoiceFormSchema = applyInvoicePaymentRefines(
-  createInvoiceBaseSchema.omit({ items: true }).extend({
-    items: z.array(formLineItemSchema).min(1, 'Add at least one line item'),
+export const invoiceFormSchema = invoiceFormBaseSchema
+  .refine(
+    (data) =>
+      (data.payment_method !== 'other' && data.payment_method !== 'both') ||
+      data.payment_method_note !== '',
+    {
+      message: 'Payment details required',
+      path: ['payment_method_note'],
+    }
+  )
+  .refine((data) => data.payment_method !== 'credit' || data.paid_amount === 0, {
+    message: 'Credit invoices must have zero amount paid',
+    path: ['paid_amount'],
   })
-).superRefine((data, ctx) => {
+  .superRefine((data, ctx) => {
   const flat = flattenFormLineItems(data.items);
   if (flat.length === 0) {
     ctx.addIssue({
