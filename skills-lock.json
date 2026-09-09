@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "desktop-principles": {
+      "source": "athevon/genjutsu",
+      "sourceType": "github",
+      "skillPath": "skills/_jutsu/desktop-principles/SKILL.md",
+      "computedHash": "e1006a145e83654eaa98c547af78cffaf76815f119a50d8121bf3f6edd2e8e1b"
+    }
+  }
+}
