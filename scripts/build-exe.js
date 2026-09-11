@@ -24,6 +24,29 @@ execSync('npm run build', {
 });
 
 const standaloneDir = path.join(projectRoot, '.next/standalone');
+
+// Never ship a database. Next's output tracing follows db.ts's filesystem access and
+// copies whatever sits in ./data into the standalone build — on a developer machine that
+// is the live garage.db: every customer, the password hashes and valid session tokens.
+// electron/main.js would then install it as the "seed" database on first run.
+// next.config.ts excludes ./data from tracing; this strips and checks as a backstop.
+const tracedDataDir = path.join(standaloneDir, 'data');
+if (fs.existsSync(tracedDataDir)) {
+  console.warn('WARNING: removing traced ./data from the standalone build — it must never ship.');
+  fs.rmSync(tracedDataDir, { recursive: true, force: true });
+}
+const findDatabases = (dir) =>
+  fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const entryPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) return entry.name === 'node_modules' ? [] : findDatabases(entryPath);
+    return /\.(db|sqlite3?)(-wal|-shm|-journal)?$/i.test(entry.name) ? [entryPath] : [];
+  });
+const leakedDatabases = findDatabases(standaloneDir);
+if (leakedDatabases.length > 0) {
+  console.error('ERROR: database files found in the standalone build — refusing to package:');
+  leakedDatabases.forEach((dbFile) => console.error('  ' + dbFile));
+  process.exit(1);
+}
 console.log('Copying static assets to standalone folder...');
 const publicDir = path.join(projectRoot, 'public');
 const staticDir = path.join(projectRoot, '.next/static');
@@ -42,10 +65,14 @@ if (fs.existsSync(buildIdFile)) {
   fs.cpSync(buildIdFile, path.join(standaloneDir, '.next/BUILD_ID'));
 }
 
-const envLocalFile = path.join(projectRoot, '.env.local');
-if (fs.existsSync(envLocalFile)) {
-  fs.copyFileSync(envLocalFile, path.join(standaloneDir, '.env.production'));
-  fs.copyFileSync(envLocalFile, path.join(standaloneDir, '.env'));
+// Ship production config only when it is deliberately provided as .env.production.
+// .env.local is a developer's machine-local file (it can hold personal tokens) and was
+// previously copied in wholesale, embedding it in every installer built on that machine.
+// CI never has one, so this also makes local builds match the releases customers get.
+const envProductionFile = path.join(projectRoot, '.env.production');
+if (fs.existsSync(envProductionFile)) {
+  console.log('Including .env.production in standalone build...');
+  fs.copyFileSync(envProductionFile, path.join(standaloneDir, '.env.production'));
 }
 
 console.log('Ensuring complete Next.js runtime in standalone node_modules...');
