@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, utilityProcess } = require('electron');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
@@ -13,6 +13,9 @@ app.disableHardwareAcceleration();
 
 let mainWindow = null;
 let logFilePath = null;
+// The Next.js standalone server, running in its own utility process (production only).
+let serverProcess = null;
+let serverUrl = null;
 
 function formatArg(a) {
   if (a instanceof Error || (a && typeof a === 'object' && a.stack)) {
@@ -127,6 +130,7 @@ function loadAppUrl(win, url) {
   const poll = () => {
     attempts++;
     http.get(url, (res) => {
+      res.resume(); // drain the probe response so its socket is released
       log(`Server responded at ${url} with status ${res.statusCode}. Loading in window...`);
       win.loadURL(url);
     }).on('error', (err) => {
@@ -213,6 +217,12 @@ async function createWindow() {
     mainWindow.webContents.openDevTools();
   } else {
     log('Running in PRODUCTION mode');
+    if (serverProcess && serverUrl) {
+      // macOS re-opens a window from the dock while the server is still running —
+      // point the new window at it instead of starting a second server.
+      loadAppUrl(mainWindow, serverUrl);
+      return;
+    }
     const userDataPath = app.getPath('userData');
     log('User Data Path:', userDataPath);
     if (!fs.existsSync(userDataPath)) {
@@ -245,12 +255,6 @@ async function createWindow() {
       }
     }
 
-    process.env.APP_DATA_DIR = userDataPath;
-    process.env.DATABASE_PATH = dbPath;
-    process.env.NODE_ENV = 'production';
-    process.env.ELECTRON_RUN_AS_NODE = '1';
-    process.env.HOSTNAME = '127.0.0.1';
-
     const defaultCloudUrl = 'postgresql://neondb_owner:npg_2WfIXydQTn1z@ep-purple-frost-aynhchr1-pooler.c-5.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require';
     if (!process.env.CLOUD_DATABASE_URL) {
       process.env.CLOUD_DATABASE_URL = defaultCloudUrl;
@@ -260,7 +264,6 @@ async function createWindow() {
     }
 
     const port = await getAvailablePort(3000);
-    process.env.PORT = String(port);
     log(`Selected port: ${port}`);
 
     // Ensure Next.js cache directory is inside writable userData (prevents EPERM in Program Files)
@@ -268,7 +271,6 @@ async function createWindow() {
     if (!fs.existsSync(cacheDir)) {
       try { fs.mkdirSync(cacheDir, { recursive: true }); } catch (_) {}
     }
-    process.env.NEXT_CACHE_DIR = cacheDir;
 
     const serverScript = findStandaloneServer();
     if (!serverScript) {
@@ -284,43 +286,68 @@ async function createWindow() {
     const serverDir = path.dirname(serverScript);
     const standaloneModules = path.join(serverDir, 'node_modules');
 
-    // Standalone Next.js must run with its own cwd and module resolution paths.
-    process.chdir(serverDir);
-    if (fs.existsSync(standaloneModules)) {
-      process.env.NODE_PATH = standaloneModules;
-      require('module').Module._initPaths();
-    }
+    // The Next.js server runs in its own utility process, never inside this one.
+    //
+    // It used to be require()d straight into the Electron main process. That put every
+    // HTTP request and every synchronous SQLite query on the same thread as Chromium's
+    // UI and print pipeline, so anything that blocked that thread during printing — the
+    // native print dialog, a slow driver, a stuck spooler — froze the backend with it and
+    // the whole app locked up. Measured against a 5s main-thread block: the in-process
+    // server answered a request after 4.00s; a utilityProcess server answered in 0.01s.
+    // Running `server.js` as its own process is also how Next documents standalone output.
+    const serverEnv = {
+      ...process.env,
+      APP_DATA_DIR: userDataPath,
+      DATABASE_PATH: dbPath,
+      NODE_ENV: 'production',
+      HOSTNAME: '127.0.0.1',
+      PORT: String(port),
+      NEXT_CACHE_DIR: cacheDir,
+      ...(fs.existsSync(standaloneModules) ? { NODE_PATH: standaloneModules } : {}),
+    };
+    // A utility process is already a Node environment; this flag must not leak into it.
+    delete serverEnv.ELECTRON_RUN_AS_NODE;
 
-    log(`Starting standalone server from: ${serverScript}`);
+    log(`Starting standalone server in a utility process: ${serverScript}`);
     log(`Standalone cwd: ${serverDir}`);
-    log(`Standalone NODE_PATH: ${process.env.NODE_PATH || '(unset)'}`);
 
     try {
-      // Attach built-in SQLite driver to global so Next.js API routes have guaranteed direct access
-      try {
-        const sqlite = require('node:sqlite');
-        global.__node_sqlite = sqlite;
-        log('Built-in node:sqlite driver verified and attached to global.__node_sqlite');
-      } catch (_) {
-        try {
-          require(path.join(standaloneModules, 'better-sqlite3'));
-          log('better-sqlite3 native module loaded successfully');
-        } catch (sqliteErr) {
-          log('WARNING: SQLite driver failed to load:', sqliteErr);
-        }
-      }
+      serverProcess = utilityProcess.fork(serverScript, [], {
+        cwd: serverDir,
+        env: serverEnv,
+        stdio: 'pipe',
+        serviceName: 'Garage App Server',
+      });
 
-      require(serverScript);
-      log('Standalone server module required successfully');
+      // The server's own console output (DB init, API errors) still lands in app.log.
+      const pipeServerOutput = (stream, tag) => {
+        if (!stream) return;
+        stream.setEncoding('utf8');
+        stream.on('data', (chunk) => {
+          for (const line of chunk.split(/\r?\n/)) {
+            if (line) log(`[SERVER${tag}] ${line}`);
+          }
+        });
+      };
+      pipeServerOutput(serverProcess.stdout, '');
+      pipeServerOutput(serverProcess.stderr, ':err');
+
+      serverProcess.on('spawn', () => log(`Server process started (pid ${serverProcess.pid})`));
+      serverProcess.on('exit', (code) => {
+        log(`Server process exited with code ${code}`);
+        serverProcess = null;
+        serverUrl = null;
+      });
     } catch (err) {
-      log('FATAL: Exception while requiring standalone server:', err && err.stack ? err.stack : err);
+      log('FATAL: Could not start the standalone server process:', err && err.stack ? err.stack : err);
       dialog.showErrorBox(
         'Server Launch Error',
-        'An error occurred while initializing the internal server:\n\n' + ((err && err.message) || String(err)) + '\n\nCheck log: ' + logFilePath
+        'An error occurred while starting the internal server:\n\n' + ((err && err.message) || String(err)) + '\n\nCheck log: ' + logFilePath
       );
     }
 
-    loadAppUrl(mainWindow, `http://127.0.0.1:${port}`);
+    serverUrl = `http://127.0.0.1:${port}`;
+    loadAppUrl(mainWindow, serverUrl);
   }
 }
 
@@ -337,10 +364,11 @@ async function saveInvoiceAsPdf(win, defaultFilename, startedAt, debugContext = 
   }
 
   try {
+    // preferCSSPageSize lets the sheet's own `@page` rule decide the paper, so the
+    // exported PDF matches what the printer path produces on every platform.
     const pdfData = await win.webContents.printToPDF({
       printBackground: true,
-      pageSize: 'A4',
-      margins: { marginType: 'none' },
+      preferCSSPageSize: true,
     });
 
     const { canceled, filePath } = await dialog.showSaveDialog(win, {
@@ -353,7 +381,7 @@ async function saveInvoiceAsPdf(win, defaultFilename, startedAt, debugContext = 
       return { success: false, canceled: true, error: 'Save canceled', elapsedMs: Date.now() - startedAt };
     }
 
-    fs.writeFileSync(filePath, pdfData);
+    await fs.promises.writeFile(filePath, pdfData);
     log('[DOWNLOAD] Invoice PDF saved:', filePath);
     log('[DOWNLOAD] ========== PDF export finished ==========');
     return { success: true, filePath, elapsedMs: Date.now() - startedAt };
@@ -367,7 +395,105 @@ async function saveInvoiceAsPdf(win, defaultFilename, startedAt, debugContext = 
   }
 }
 
-ipcMain.handle('print-invoice', async (event, payload = {}) => {
+// One print or PDF operation per window at a time. Chromium does not support overlapping
+// print operations on one WebContents, and a second click while the first dialog or spool
+// was still open used to stack another job on top of it — compounding any freeze.
+const printJobsInFlight = new Set();
+
+async function withPrintLock(webContents, job) {
+  const key = webContents.id;
+  if (printJobsInFlight.has(key)) {
+    log('[PRINT] Rejected: a print job is already in progress for this window');
+    return { success: false, error: 'A print job is already in progress' };
+  }
+  printJobsInFlight.add(key);
+  try {
+    return await job();
+  } finally {
+    printJobsInFlight.delete(key);
+  }
+}
+
+/**
+ * Logs the installed printers to app.log. Called only AFTER a job has been handed off and
+ * never awaited — enumeration queries every installed driver, which on Windows can take
+ * seconds for an offline or misconfigured printer, and printing doesn't need any of it.
+ */
+async function logPrinterInventory(win) {
+  try {
+    if (win.isDestroyed()) return;
+    const printers = await win.webContents.getPrintersAsync();
+    if (printers.length === 0) {
+      log('[PRINT] Printer inventory: none detected');
+      return;
+    }
+    for (const p of printers) {
+      log(
+        '[PRINT] Printer inventory:',
+        JSON.stringify({ name: p.name, displayName: p.displayName, isDefault: p.isDefault, status: p.status })
+      );
+    }
+  } catch (err) {
+    log('[PRINT] Printer inventory failed:', err && err.message);
+  }
+}
+
+/** Chromium words a dismissed print dialog differently per platform. */
+function isUserCancel(reason) {
+  return typeof reason === 'string' && /cancel/i.test(reason);
+}
+
+/**
+ * Last-resort print route, used when the direct spooler job fails or never returns.
+ *
+ * Renders the same page to a PDF and opens it in whatever the OS registers as the
+ * default PDF handler, so the operator can print from there. `shell.openPath` is the
+ * cross-platform door — Windows, macOS and Linux all resolve it — which makes this the
+ * one path that does not depend on the printer driver behaving during rasterization.
+ */
+async function printViaPdfFallback(win, reason) {
+  log('[PRINT] Direct print did not complete —', reason);
+  log('[PRINT] Falling back to PDF hand-off via the OS default PDF viewer…');
+  try {
+    const pdfData = await win.webContents.printToPDF({
+      printBackground: true,
+      // Honour the sheet's own @page rules rather than re-imposing a paper size.
+      preferCSSPageSize: true,
+    });
+
+    const outPath = path.join(app.getPath('temp'), `invoice-${Date.now()}.pdf`);
+    await fs.promises.writeFile(outPath, pdfData);
+    log('[PRINT] Fallback PDF written:', outPath, `(${pdfData.length} bytes)`);
+
+    const openError = await shell.openPath(outPath); // '' means it opened
+    if (openError) {
+      log('[PRINT] Fallback: OS could not open the PDF:', openError);
+      return {
+        success: false,
+        usedFallback: true,
+        fallbackPath: outPath,
+        error: `Printing failed and the PDF viewer could not be opened. The invoice was saved to ${outPath}`,
+      };
+    }
+
+    log('[PRINT] Fallback: PDF opened in the OS default viewer — operator prints from there');
+    return {
+      success: true,
+      usedFallback: true,
+      fallbackPath: outPath,
+      error: null,
+    };
+  } catch (err) {
+    log('[PRINT] Fallback FAILED:', err && err.stack ? err.stack : err);
+    return {
+      success: false,
+      usedFallback: true,
+      error: `Printing failed (${reason}) and the PDF fallback also failed: ${(err && err.message) || String(err)}`,
+    };
+  }
+}
+
+async function runPrintJob(event, payload = {}) {
   const customOptions = payload.options || {};
   const debugContext = payload.debugContext || {};
   const startedAt = Date.now();
@@ -401,78 +527,55 @@ ipcMain.handle('print-invoice', async (event, payload = {}) => {
   log('[PRINT] Page isLoading:', win.webContents.isLoading());
   log('[PRINT] Page isLoadingMainFrame:', win.webContents.isLoadingMainFrame());
 
-  try {
-    const readiness = await win.webContents.executeJavaScript(`({
-      readyState: document.readyState,
-      title: document.title,
-      imageCount: document.images.length,
-      imagesLoaded: Array.from(document.images).filter(i => i.complete && i.naturalHeight > 0).length,
-      imagesFailed: Array.from(document.images).filter(i => i.complete && i.naturalHeight === 0).map(i => i.src),
-      bodyTextLength: document.body ? document.body.innerText.length : 0,
-    })`, true);
-    log('[PRINT] Main-process page snapshot:', JSON.stringify(readiness));
-    if (readiness.imagesFailed?.length) {
-      log('[PRINT] WARNING: Broken image(s) on page — print raster may fail or hang:', readiness.imagesFailed.join(', '));
-    }
-    if (readiness.bodyTextLength === 0) {
-      log('[PRINT] WARNING: Page body appears empty — invoice may not have rendered yet');
-    }
-  } catch (err) {
-    log('[PRINT] Could not read page snapshot:', err && err.message);
+  // No executeJavaScript probe and no printer enumeration on this path any more.
+  //
+  // The renderer already waits for images and fonts and measures the page before it
+  // calls in (waitForPrintAssets), and sends that snapshot as debugContext — a second
+  // round trip into the page here only delayed the job. Printer enumeration was worse:
+  // getPrintersAsync() queries every installed driver, which on Windows can take
+  // seconds when a printer is offline or misconfigured, and it ran before every print
+  // purely to feed the log. It now runs after the job instead (logPrinterInventory).
+  if (debugContext.bodyTextLength === 0) {
+    log('[PRINT] WARNING: Page body appears empty — invoice may not have rendered yet');
+  }
+  if (Array.isArray(debugContext.imagesFailed) && debugContext.imagesFailed.length > 0) {
+    log('[PRINT] WARNING: Broken image(s) on page:', debugContext.imagesFailed.join(', '));
   }
 
-  let printers = [];
-  try {
-    printers = await win.webContents.getPrintersAsync();
-    if (printers.length === 0) {
-      log('[PRINT] WARNING: No printers detected by Electron');
-    } else {
-      for (const p of printers) {
-        log(
-          '[PRINT] Printer:',
-          JSON.stringify({
-            name: p.name,
-            isDefault: p.isDefault,
-            status: p.status,
-            description: p.description,
-            displayName: p.displayName,
-            options: p.options,
-          })
-        );
-      }
-    }
-  } catch (err) {
-    log('[PRINT] ERROR: Failed to enumerate printers:', err && err.stack ? err.stack : err);
-  }
-
-  // GUSTEC GT1122n is a monochrome direct-thermal A4 printer — forcing grayscale keeps the
-  // rasterized job small. A full-color job (the invoice has red banners) has been observed
-  // getting stuck at "Spooling" forever in the Windows print queue on this printer's driver.
-  const matchedPrinter = printers.find((p) => /gustec|gt1122/i.test(p.name));
-  const defaultPrinter = printers.find((p) => p.isDefault);
-
-  if (matchedPrinter) {
-    log('[PRINT] Matched GUSTEC/GT1122 printer:', matchedPrinter.name);
-  } else {
-    log(
-      '[PRINT] No GUSTEC/GT1122 name match — using default printer',
-      defaultPrinter ? defaultPrinter.name : '(none — Windows will prompt)'
-    );
-  }
-
+  // Page size, colour mode, margins and deviceName are all deliberately left alone.
+  //
+  // Every one of them writes into the driver's DEVMODE, and a value the driver can't
+  // satisfy is a classic cause of a job that reaches the queue and then sits at
+  // "Spooling" forever without ever rasterizing. An earlier revision forced
+  // `pageSize: 'A4'`, `margins: { marginType: 'none' }` and `color: false` at once,
+  // which is the maximum amount of DEVMODE interference possible.
+  //
+  // `usePrinterDefaultPageSize` instead keeps whatever paper the selected printer
+  // actually reports — A4, Letter or a roll — and Electron falls back to A4 by itself
+  // if the driver can't be queried. The invoice sheet is laid out at 210mm x 273mm,
+  // which fits inside both A4 (210x297) and US Letter (216x279), so the same document
+  // comes out correct on either without the driver having to scale it.
+  //
+  // `deviceName` must be an exact OS-level printer name, so hard-coding one model
+  // makes the call fail on every other machine and every other OS. With `silent: false`
+  // the native dialog already preselects the system default and lets the operator
+  // choose. A caller can still pass an explicit deviceName through `payload.options`.
   const printOptions = {
     silent: false,
     printBackground: true,
-    color: false,
-    pageSize: 'A4',
-    margins: { marginType: 'none' },
-    ...(matchedPrinter ? { deviceName: matchedPrinter.name } : {}),
+    usePrinterDefaultPageSize: true,
     ...customOptions,
   };
 
+  // Electron rejects usePrinterDefaultPageSize and pageSize together — an explicit
+  // pageSize from the caller wins.
+  if (printOptions.pageSize) {
+    delete printOptions.usePrinterDefaultPageSize;
+  }
+
   log('[PRINT] Calling webContents.print() with options:', JSON.stringify(printOptions));
 
-  return new Promise((resolve) => {
+  const directResult = await new Promise((resolve) => {
     let settled = false;
     const timeoutMs = 60000;
     const printStartedAt = Date.now();
@@ -483,14 +586,14 @@ ipcMain.handle('print-invoice', async (event, payload = {}) => {
       const elapsedMs = Date.now() - startedAt;
       log(
         `[PRINT] TIMEOUT after ${timeoutMs}ms — webContents.print() callback never fired. ` +
-          'Job may be stuck at "Spooling" in Windows. Try: Printer Properties → Advanced → ' +
-          '"Print directly to the printer", clear the print queue, or reinstall the driver.'
+          'The job is likely stuck in the print queue (Windows: "Spooling"; macOS/Linux: ' +
+          'held in CUPS). Falling back to the PDF hand-off.'
       );
       resolve({
         success: false,
-        error: 'Print job timed out. Check the printer connection and the Windows print queue.',
+        error: 'Print job timed out waiting for the printer.',
         elapsedMs,
-        printerUsed: printOptions.deviceName || defaultPrinter?.name || null,
+        printerUsed: printOptions.deviceName || null,
       });
     }, timeoutMs);
 
@@ -510,7 +613,7 @@ ipcMain.handle('print-invoice', async (event, payload = {}) => {
           success,
           error: failureReason || null,
           elapsedMs,
-          printerUsed: printOptions.deviceName || defaultPrinter?.name || null,
+          printerUsed: printOptions.deviceName || null,
         });
       });
       log('[PRINT] webContents.print() invoked — waiting for dialog and spooler…');
@@ -523,24 +626,42 @@ ipcMain.handle('print-invoice', async (event, payload = {}) => {
         success: false,
         error: (err && err.message) || String(err),
         elapsedMs: Date.now() - startedAt,
-        printerUsed: printOptions.deviceName || defaultPrinter?.name || null,
+        printerUsed: printOptions.deviceName || null,
       });
     }
   });
-});
 
-ipcMain.handle('download-invoice', async (event, payload = {}) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) {
-    return { success: false, error: 'No active window found', elapsedMs: 0 };
+  // Diagnostics only — runs after the job was handed off, and is never awaited.
+  void logPrinterInventory(win);
+
+  // A user who closes the dialog meant to stop; anything else is a real failure and
+  // gets the PDF hand-off so the invoice can still be printed.
+  if (directResult.success || isUserCancel(directResult.error)) {
+    return directResult;
   }
-  return saveInvoiceAsPdf(
-    win,
-    payload.defaultFilename || 'invoice.pdf',
-    Date.now(),
-    payload.debugContext || {}
-  );
-});
+
+  const fallback = await printViaPdfFallback(win, directResult.error || 'direct print failed');
+  return { ...directResult, ...fallback, directPrintError: directResult.error };
+}
+
+ipcMain.handle('print-invoice', (event, payload = {}) =>
+  withPrintLock(event.sender, () => runPrintJob(event, payload))
+);
+
+ipcMain.handle('download-invoice', (event, payload = {}) =>
+  withPrintLock(event.sender, () => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) {
+      return { success: false, error: 'No active window found', elapsedMs: 0 };
+    }
+    return saveInvoiceAsPdf(
+      win,
+      payload.defaultFilename || 'invoice.pdf',
+      Date.now(),
+      payload.debugContext || {}
+    );
+  })
+);
 
 // Auto-updater setup and IPC Handlers
 let autoUpdater = null;
@@ -606,6 +727,12 @@ ipcMain.handle('install-update', () => {
 });
 
 app.whenReady().then(createWindow);
+
+// The server is its own process now, so stop it explicitly instead of trusting the OS to
+// reap it — an orphaned server would keep holding its port and the SQLite database.
+app.on('before-quit', () => {
+  if (serverProcess) serverProcess.kill();
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

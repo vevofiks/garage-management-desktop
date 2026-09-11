@@ -62,6 +62,8 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
   const queryClient = useQueryClient();
   const autoDownloadTriggered = useRef(false);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isPrinting, setIsPrinting] = useState(false);
+  const printInFlight = useRef(false);
 
   const { data: invoice, isLoading } = useQuery<InvoiceDetail>({
     queryKey: queryKeys.invoices.detail(id),
@@ -106,7 +108,23 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoice, searchParams]);
 
+  // One print at a time. A second click while the first job's dialog or spool was still
+  // open used to fire another print on top of it — stacking dialogs and jobs is exactly
+  // what turns a slow printer into a frozen app. The ref stops a fast double-click that
+  // lands before React has re-rendered the button as disabled.
   const handlePrint = async () => {
+    if (printInFlight.current) return;
+    printInFlight.current = true;
+    setIsPrinting(true);
+    try {
+      await runPrint();
+    } finally {
+      printInFlight.current = false;
+      setIsPrinting(false);
+    }
+  };
+
+  const runPrint = async () => {
     logToApp("Print button clicked", {
       invoiceId: id,
       href: window.location.href,
@@ -139,17 +157,23 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
           error: res.error ?? null,
           elapsedMs: res.elapsedMs ?? null,
           printerUsed: res.printerUsed ?? null,
+          usedFallback: res.usedFallback ?? false,
         });
 
-        if (res && !res.success && res.error) {
-          if (res.error !== "Print job canceled" && res.error !== "Cancelled") {
+        if (res?.success && res.usedFallback) {
+          // The driver refused the direct job, so the invoice was handed to the OS
+          // PDF viewer instead — the operator still has to hit Print there.
+          logToApp("Print fell back to the PDF viewer", { path: res.fallbackPath ?? null });
+          toast.warning("Printer didn't respond — invoice opened in your PDF viewer, print from there");
+        } else if (res?.success) {
+          logToApp("Print reported success");
+          toast.success("Print job sent to printer");
+        } else if (res && !res.success && res.error) {
+          if (!/cancel/i.test(res.error)) {
             toast.error(`Printing failed: ${res.error}`);
           } else {
             logToApp("Print canceled by user in dialog");
           }
-        } else if (res?.success) {
-          logToApp("Print reported success");
-          toast.success("Print job sent to printer");
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Unknown error";
@@ -227,13 +251,18 @@ export default function InvoicePrintPage({ params }: { params: Promise<{ id: str
           <Button variant="outline" onClick={handleDownload} disabled={isDownloading}>
             <DownloadIcon className="size-4" /> {isDownloading ? "Saving…" : "Download PDF"}
           </Button>
-          <Button onClick={handlePrint}>
-            <PrinterIcon className="size-4" /> Print
+          <Button onClick={handlePrint} disabled={isPrinting}>
+            <PrinterIcon className="size-4" /> {isPrinting ? "Printing…" : "Print"}
           </Button>
         </div>
       </div>
 
-      <div className="flex flex-col space-y-6 rounded-md border p-8 text-neutral-900 print:box-border print:h-[273mm] print:w-[210mm] print:justify-between print:space-y-0 print:border-0 print:p-[14mm]">
+      {/*
+        Sized 210mm x 273mm so one layout fits both A4 (210x297) and US Letter
+        (216x279) — max-w caps it on the wider Letter sheet, min-h lets a long item
+        list grow onto a second page instead of being clipped at a fixed height.
+      */}
+      <div className="flex flex-col space-y-6 rounded-md border p-8 text-neutral-900 print:box-border print:min-h-[273mm] print:w-full print:max-w-[210mm] print:justify-between print:space-y-0 print:border-0 print:p-[14mm]">
         <div className="space-y-6">
           <div className="flex items-start justify-between">
             <div className="flex items-start gap-3">

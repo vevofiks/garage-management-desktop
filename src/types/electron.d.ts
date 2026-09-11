@@ -12,6 +12,12 @@ export interface PrintInvoiceResult {
   filePath?: string | null;
   elapsedMs?: number;
   printerUsed?: string | null;
+  /** True when the direct spooler job failed and the PDF hand-off was used instead. */
+  usedFallback?: boolean;
+  /** Where the fallback PDF was written, when `usedFallback` is true. */
+  fallbackPath?: string | null;
+  /** The original direct-print failure that triggered the fallback. */
+  directPrintError?: string | null;
 }
 
 export interface DownloadInvoicePayload {

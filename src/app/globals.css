@@ -122,13 +122,18 @@
 }
 
 /*
- * Print: A4 is what the garage's printer (a standard mono laser, not a
- * thermal/receipt printer) actually holds, and the printed page must not
- * inherit the dark theme — a near-black background sent to a laser printer
- * either wastes a full page of toner or renders illegibly depending on the
- * driver, and light-on-dark text isn't guaranteed to come out as visible
- * black ink. Force the light palette for print regardless of which theme
- * the user has active on screen.
+ * Print: the printed page must not inherit the dark theme — a near-black
+ * background sent to a laser printer either wastes a full page of toner or
+ * renders illegibly depending on the driver, and light-on-dark text isn't
+ * guaranteed to come out as visible black ink. Force the light palette for
+ * print regardless of which theme the user has active on screen.
+ *
+ * `size` is deliberately NOT pinned to A4. Pinning it makes the layout box a
+ * fixed paper the driver may not stock, which on some drivers is enough to
+ * leave the job sitting in the queue unrendered, and it breaks US Letter
+ * machines outright. `auto` takes whatever paper the selected printer reports
+ * on any OS; the invoice sheet is sized 210mm x 273mm so it fits inside both
+ * A4 (210x297) and US Letter (216x279) without the driver having to scale.
  *
  * margin: 0 here is deliberate, not an oversight — a nonzero @page margin
  * is exactly the area Chrome draws its own "headers and footers" (page
@@ -139,7 +144,7 @@
  * (src/app/invoices/[id]/print/page.tsx) instead.
  */
 @page {
-  size: A4;
+  size: auto;
   margin: 0;
 }
 
@@ -153,6 +158,18 @@
     --muted: oklch(0.97 0 0);
     --muted-foreground: oklch(0.556 0 0);
     --border: oklch(0.922 0 0);
+  }
+
+  /*
+   * Browsers ship with "Background graphics" OFF in the print dialog, and a page
+   * cannot tick that box for the user. Without this the invoice's red table header
+   * and the Balance Due bar print as white text on white paper — i.e. the column
+   * headings and the amount owed silently vanish from the customer's copy. The
+   * property is inherited, so declaring it on :root covers the whole sheet.
+   */
+  :root {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
   body {
