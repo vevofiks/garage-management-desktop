@@ -172,6 +172,17 @@
     print-color-adjust: exact;
   }
 
+  /*
+   * Toasts render in a portal at the end of <body>, outside AppShell's print:hidden
+   * chrome, so any toast still on screen when the user prints (an "Invoice created"
+   * from a moment earlier, say) was captured into the printed page and into the
+   * exported PDF. printToPDF renders with print media too, so hiding it here covers
+   * printing, the PDF download and the PDF fallback alike.
+   */
+  [data-sonner-toaster] {
+    display: none !important;
+  }
+
   body {
     background: white !important;
   }
